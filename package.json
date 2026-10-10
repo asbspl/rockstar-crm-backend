@@ -2,10 +2,13 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/app.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "start:dev": "nodemon src/app.js",
+    "build": "node --check src/app.js && node --check src/database/migrate.js",
+    "migration": "node src/database/migrate.js"
   },
   "keywords": [],
   "author": "",
