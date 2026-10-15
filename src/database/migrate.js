@@ -5,6 +5,9 @@ const databasePool = require("../config/db");
 
 const migrationPath = path.join(__dirname, "migrations", "001_create_clients.sql");
 const locationMigrationPath = path.join(__dirname, "migrations", "002_client_location.sql");
+const authMigrationPath = path.join(__dirname, "migrations", "003_auth_and_rbac.sql");
+const approvalMigrationPath = path.join(__dirname, "migrations", "004_auth_approval_workflow.sql");
+
 const expectedColumns = {
   id: { type: "bigint", nullable: "NO", identity: "YES", identityGeneration: "BY DEFAULT" },
   client_name: { type: "text", nullable: "NO" },
@@ -196,9 +199,11 @@ async function runMigration() {
       await verifySchema(client);
       await client.query(fs.readFileSync(locationMigrationPath, "utf8"));
       await verifyLocationSchema(client);
+      await client.query(fs.readFileSync(authMigrationPath, "utf8"));
+      await client.query(fs.readFileSync(approvalMigrationPath, "utf8"));
       await client.query("COMMIT");
       console.log(
-        `Migrations verified: ${existing.rows[0].clients_table ? "clients existed" : "clients created"}; ${existing.rows[0].locations_table ? "locations existed" : "locations created"}.`
+        `Migrations verified: ${existing.rows[0].clients_table ? "clients existed" : "clients created"}; ${existing.rows[0].locations_table ? "locations existed" : "locations created"}; auth RBAC and approval workflow ready.`
       );
       if (createdDatabase) console.log("The database was created from DB_NAME in .env.");
     } catch (error) {

@@ -1,28 +1,32 @@
-const { ZodError } = require("zod");
 
-function errorMiddleware(error, req, res, next) {
-  if (res.headersSent) return next(error);
+function errorMiddleware(err, req, res, next) {
+  console.error("API Error:", {
+    method: req.method,
+    path: req.originalUrl,
+    message: err.message,
+    code: err.code,
+    detail: err.detail,
+    stack: err.stack,
+  });
 
-  let statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
-  let message = error.message || "An unexpected error occurred";
-
-  if (error instanceof ZodError) {
-    statusCode = 400;
-    message = "Invalid request data";
-  } else if (statusCode >= 500 && !error.isOperational) {
-    message = "An internal server error occurred";
+  if (res.headersSent) {
+    return next(err);
   }
 
-  if (statusCode >= 500) {
-    console.error("Request failed", {
-      method: req.method,
-      path: req.originalUrl,
-      name: error.name,
-      code: error.code || "unknown",
-    });
-  }
+  const statusCode =
+    Number.isInteger(err.statusCode) && err.statusCode >= 400
+      ? err.statusCode
+      : Number.isInteger(err.status) && err.status >= 400
+        ? err.status
+        : 500;
 
-  res.status(statusCode).json({ success: false, message });
+  return res.status(statusCode).json({
+    success: false,
+    message:
+      statusCode >= 500
+        ? "An internal server error occurred"
+        : err.message || "Request failed",
+  });
 }
 
 module.exports = errorMiddleware;
