@@ -57,7 +57,7 @@ async function assignSuperAdminDashboardAccess() {
     );
 
     await client.query("COMMIT");
-    console.log("Super Admin dashboard access is assigned to the existing target account.");
+
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
