@@ -852,142 +852,185 @@ function createAuthService(config, dependencies = {}) {
     // REQUEST PASSWORD RESET
     // ========================================================
 
+    async requestPasswordReset(email) {
+      const normalizedEmail = String(email || "")
+        .trim()
+        .toLowerCase();
 
-async requestPasswordReset(email) {
-  const normalizedEmail = String(email || "")
-    .trim()
-    .toLowerCase();
+      if (!normalizedEmail) {
+        throw new ApiError(
+          400,
+          "Please enter your email address."
+        );
+      }
 
-  if (!normalizedEmail) {
-    throw new ApiError(400, "Email is required.");
-  }
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    throw new ApiError(400, "A valid email is required.");
-  }
-
-  // Find the user.
-  const user = await authModel.findPasswordResetUserByEmail(
-    normalizedEmail
-  );
-
-  console.log("Password reset request:", {
-    email: normalizedEmail,
-    userFound: Boolean(user),
-    status: user?.status,
-    accountStatus: user?.account_status,
-    isDeleted: user?.is_deleted,
-    lockedUntil: user?.locked_until,
-  });
-
-  // Do not disclose whether an account exists.
-  if (!user || !isPasswordResetEligible(user)) {
-  console.warn("Password reset skipped: account is ineligible");
-
-  return {
-    requested: true,
-    emailSent: false,
-  };
-}
-
-  const frontendUrl = String(
-    config.frontendUrl || process.env.FRONTEND_URL || ""
-  ).trim();
-
-  if (!frontendUrl) {
-    throw new ApiError(
-      500,
-      "Password reset is not configured: FRONTEND_URL is missing."
-    );
-  }
-
-  let resetUrl;
-
-  try {
-    resetUrl = new URL("/reset-password", frontendUrl);
-  } catch {
-    throw new ApiError(
-      500,
-      "Password reset is not configured: FRONTEND_URL is invalid."
-    );
-  }
-
-  // Generate a secure, single-use reset token.
-  const resetToken = crypto.randomBytes(32).toString("hex");
-  const tokenHash = hashToken(resetToken);
-
-  const expiryMinutes = Math.max(
-    1,
-    Number(process.env.PASSWORD_RESET_EXPIRY_MINUTES) || 15
-  );
-
-  const expiresAt = new Date(
-    Date.now() + expiryMinutes * 60 * 1000
-  );
-
-  // The model also verifies the latest registration review.
-  const saved = await authModel.savePasswordResetTokenIfEligible(
-    user.id,
-    tokenHash,
-    { expiresAt }
-  );
-
-  console.log("Password reset token saved:", Boolean(saved));
-
-if (!saved) {
-  console.warn(
-    "Password reset skipped: account failed final eligibility check",
-    { userId: user.id }
-  );
-
-  return {
-    requested: true,
-    emailSent: false,
-  };
-}
-
-  resetUrl.searchParams.set("token", resetToken);
-
-  // Send the email. SMTP errors must propagate to the API error handler.
-  try {
-    if (typeof sendResetEmail !== "function") {
-      throw new Error(
-        "sendPasswordResetEmail is not configured correctly."
+      // 1. Find the account, including its latest registration review.
+      const user = await authModel.findPasswordResetUserByEmail(
+        normalizedEmail
       );
-    }
 
-    await sendResetEmail(user.email, resetUrl.toString());
+      if (!user) {
+        throw new ApiError(
+          404,
+          "No account was found with this email address. Please check your email or register first."
+        );
+      }
 
-    console.info("Password reset email accepted by SMTP", {
-      userId: user.id,
-    });
+      // 2. Check account and registration approval.
+      const reviewStatus = String(
+        user.registration_status || ""
+      )
+        .trim()
+        .toLowerCase();
 
-    return {
-      requested: true,
-      emailSent: true,
-    };
-  } catch (error) {
-    console.error("Password reset email failed:", {
-      message: error.message,
-      code: error.code,
-      response: error.response,
-    });
+      const accountStatus = String(
+        user.account_status || ""
+      )
+        .trim()
+        .toLowerCase();
 
-    try {
-      await authModel.invalidatePasswordResetTokens(user.id);
-    } catch (invalidateError) {
-      console.error(
-        "Failed to invalidate password reset token:",
-        invalidateError.message
+      const userStatus = String(
+        user.status || ""
+      )
+        .trim()
+        .toLowerCase();
+
+      if (reviewStatus === "rejected" || accountStatus === "rejected") {
+        throw new ApiError(
+          403,
+          "Your registration request has been rejected. Please contact the administrator."
+        );
+      }
+
+      if (
+        reviewStatus === "pending" ||
+        reviewStatus === "under_review" ||
+        !reviewStatus ||
+        accountStatus === "pending" ||
+        accountStatus === "under_review"
+      ) {
+        throw new ApiError(
+          403,
+          "Your registration is awaiting admin approval. You can reset your password after your account is approved."
+        );
+      }
+
+      if (
+        reviewStatus !== "approved" ||
+        accountStatus !== "approved" ||
+        userStatus !== "active" ||
+        user.is_deleted === true
+      ) {
+        throw new ApiError(
+          403,
+          "Your account is not eligible for password reset. Please contact the administrator."
+        );
+      }
+
+      // 3. Do not allow password resets for temporarily locked accounts.
+      if (
+        user.locked_until &&
+        new Date(user.locked_until).getTime() > Date.now()
+      ) {
+        throw new ApiError(
+          403,
+          "Your account is temporarily locked. Please contact the administrator."
+        );
+      }
+
+      // 4. Generate a cryptographically secure reset token.
+      const resetToken = crypto.randomBytes(32).toString("hex");
+      const tokenHash = hashToken(resetToken);
+
+      const expiryMinutes = Math.max(
+        1,
+        Number(process.env.PASSWORD_RESET_EXPIRY_MINUTES) || 15
       );
-    }
 
-    throw new ApiError(
-      500,
-      "Unable to send the password reset email. Please check the backend email configuration."
-    );
-  }
-},
+      const expiresAt = new Date(
+        Date.now() + expiryMinutes * 60 * 1000
+      );
+
+      // 5. Save only the token hash in the database.
+      const saved = await authModel.savePasswordResetTokenIfEligible(
+        user.id,
+        tokenHash,
+        { expiresAt }
+      );
+
+      if (!saved) {
+        throw new ApiError(
+          403,
+          "Your account is no longer eligible for password reset. Please contact the administrator."
+        );
+      }
+
+      // 6. Build the reset link for the frontend.
+      const frontendUrl =
+        config.frontendUrl || process.env.FRONTEND_URL;
+
+      if (!frontendUrl) {
+        await authModel.invalidatePasswordResetTokens(user.id);
+
+        throw new ApiError(
+          500,
+          "Password reset could not be completed because the frontend URL is not configured."
+        );
+      }
+
+      let resetUrl;
+
+      try {
+        const resetUrlObject = new URL(
+          "/reset-password",
+          frontendUrl
+        );
+
+        resetUrlObject.searchParams.set("token", resetToken);
+        resetUrl = resetUrlObject.toString();
+      } catch {
+        await authModel.invalidatePasswordResetTokens(user.id);
+
+        throw new ApiError(
+          500,
+          "The password reset URL is incorrectly configured."
+        );
+      }
+
+      // 7. Send the reset email.
+try {
+        // The email utility should throw if sending fails.
+        // Do not require a particular return-object format.
+        await sendResetEmail(user.email, resetUrl);
+      } catch (error) {
+        // Invalidate the token if email delivery fails.
+        try {
+          await authModel.invalidatePasswordResetTokens(user.id);
+        } catch (cleanupError) {
+          console.error(
+            "Failed to invalidate password reset tokens:",
+            cleanupError.message
+          );
+        }
+
+        console.error("Password reset email delivery failed:", {
+          message: error.message,
+          code: error.code,
+        });
+
+        throw new ApiError(
+          502,
+          "Unable to send the password reset email. Please try again later."
+        );
+      }
+
+      // 8. Return success after the email utility completes.
+      return {
+        requested: true,
+        emailSent: true,
+        message: "Password reset email sent successfully. Please check your inbox.",
+      };
+    },
 
 
     // ========================================================

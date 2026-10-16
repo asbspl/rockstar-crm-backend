@@ -116,6 +116,7 @@ async function findById(id) {
 // PASSWORD RESET: FIND ACCOUNT
 // ============================================================
 
+
 async function findPasswordResetUserByEmail(email) {
   const normalizedEmail = String(email || "")
     .trim()
@@ -129,22 +130,31 @@ async function findPasswordResetUserByEmail(email) {
 
   const result = await pool.query(
     `SELECT
-       id,
-       email,
-       full_name,
-       status,
-       account_status,
-       is_deleted,
-       locked_until
-     FROM public.users
-     WHERE LOWER(TRIM(email)) = $1
-       AND COALESCE(is_deleted, FALSE) = FALSE
+       u.id,
+       u.email,
+       u.full_name,
+       u.status,
+       u.account_status,
+       u.is_deleted,
+       u.locked_until,
+       registration.decision AS registration_status
+     FROM public.users u
+     LEFT JOIN LATERAL (
+       SELECT rr.decision
+       FROM public.registration_reviews rr
+       WHERE rr.user_id = u.id
+       ORDER BY rr.created_at DESC NULLS LAST, rr.id DESC
+       LIMIT 1
+     ) registration ON TRUE
+     WHERE LOWER(TRIM(u.email)) = $1
+       AND COALESCE(u.is_deleted, FALSE) = FALSE
      LIMIT 1`,
     [normalizedEmail]
   );
 
   return result.rows[0] || null;
 }
+
 
 // ============================================================
 // USER ROLES AND PERMISSIONS
