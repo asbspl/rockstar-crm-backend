@@ -135,12 +135,14 @@ async function listPermissions(req, res, next) {
   }
 }
 
+
 async function reviewRegistration(req, res, next) {
   let client;
 
   try {
     const userId = req.params.id;
-    const reviewerId = req.user?.id;
+    const reviewerId = req.auth?.userId;
+
     const {
       decision,
       reason = "",
@@ -148,7 +150,7 @@ async function reviewRegistration(req, res, next) {
       permissionIds = [],
     } = req.body;
 
-    if (!/^\d+$/.test(userId)) {
+    if (!/^\d+$/.test(userId) || Number(userId) <= 0) {
       return res.status(400).json({
         success: false,
         message: "Invalid registration ID.",
@@ -177,7 +179,12 @@ async function reviewRegistration(req, res, next) {
     }
 
     const validIds = (ids) =>
-      ids.every((id) => /^\d+$/.test(String(id)) && Number(id) > 0);
+      ids.every(
+        (id) =>
+          /^\d+$/.test(String(id)) &&
+          Number.isSafeInteger(Number(id)) &&
+          Number(id) > 0
+      );
 
     if (
       !validIds(roleIds) ||
@@ -211,13 +218,15 @@ async function reviewRegistration(req, res, next) {
     const userResult = await client.query(
       `SELECT id, account_status
        FROM public.users
-       WHERE id = $1 AND is_deleted = FALSE
+       WHERE id = $1
+         AND is_deleted = FALSE
        FOR UPDATE`,
       [userId]
     );
 
     if (!userResult.rowCount) {
       await client.query("ROLLBACK");
+
       return res.status(404).json({
         success: false,
         message: "Registration not found.",
@@ -226,6 +235,7 @@ async function reviewRegistration(req, res, next) {
 
     if (userResult.rows[0].account_status !== "pending") {
       await client.query("ROLLBACK");
+
       return res.status(409).json({
         success: false,
         message: "This registration has already been reviewed.",
@@ -233,66 +243,60 @@ async function reviewRegistration(req, res, next) {
     }
 
     if (decision === "approved") {
-      const roles = await client.query(
+      const rolesResult = await client.query(
         `SELECT id
          FROM public.roles
          WHERE id::text = ANY($1::text[])`,
         [roleIds.map(String)]
       );
 
-      if (roles.rowCount !== roleIds.length) {
+      if (rolesResult.rowCount !== roleIds.length) {
         await client.query("ROLLBACK");
+
         return res.status(400).json({
           success: false,
           message: "One or more selected roles do not exist.",
         });
       }
 
-      const permissions = await client.query(
+      const permissionsResult = await client.query(
         `SELECT id
          FROM public.permissions
          WHERE id::text = ANY($1::text[])`,
         [permissionIds.map(String)]
       );
 
-      if (permissions.rowCount !== permissionIds.length) {
+      if (permissionsResult.rowCount !== permissionIds.length) {
         await client.query("ROLLBACK");
+
         return res.status(400).json({
           success: false,
           message: "One or more selected permissions do not exist.",
         });
       }
 
+      // Remove existing role assignments.
       await client.query(
-        `DELETE FROM public.user_roles WHERE user_id = $1`,
+        `DELETE FROM public.user_roles
+         WHERE user_id = $1`,
         [userId]
       );
 
-      await client.query(
-        `INSERT INTO public.user_roles (user_id, role_id, assigned_by)
-         SELECT $1, r.id, $2
-         FROM public.roles r
-         WHERE r.id::text = ANY($3::text[])`,
-        [userId, reviewerId, roleIds.map(String)]
-      );
-
-      // This implementation expects public.user_permissions to exist
-      // with user_id, permission_id and granted_by columns.
-      await client.query(
-        `DELETE FROM public.user_permissions WHERE user_id = $1`,
-        [userId]
-      );
-
-      if (permissionIds.length > 0) {
+      // Assign every selected role.
+      for (const roleId of roleIds) {
         await client.query(
-          `INSERT INTO public.user_permissions
-             (user_id, permission_id, granted_by)
-           SELECT $1, p.id, $2
-           FROM public.permissions p
-           WHERE p.id::text = ANY($3::text[])`,
-          [userId, reviewerId, permissionIds.map(String)]
+          `INSERT INTO public.user_roles (user_id, role_id)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id, role_id) DO NOTHING`,
+          [userId, roleId]
         );
       }
+
+      // This database uses role_permissions for role-based permissions.
+      // Do not query public.user_permissions because that table is absent.
+      //
+      // Selected permissionIds are validated above, but are not stored
+      // as individual user grants in this implementation.
 
       await client.query(
         `UPDATE public.users
@@ -313,19 +317,18 @@ async function reviewRegistration(req, res, next) {
       );
     }
 
-    // Save audit history if this table is present.
-    const historyTable = await client.query(
-      `SELECT to_regclass('public.registration_review_history') AS table_name`
+    // Record the decision using the existing registration_reviews table.
+    await client.query(
+      `INSERT INTO public.registration_reviews
+         (user_id, reviewed_by, decision, notes, reviewed_at)
+       VALUES ($1, $2, $3, $4, NOW())`,
+      [
+        userId,
+        reviewerId,
+        decision,
+        String(reason).trim() || null,
+      ]
     );
-
-    if (historyTable.rows[0].table_name) {
-      await client.query(
-        `INSERT INTO public.registration_review_history
-           (user_id, reviewed_by, decision, reason)
-         VALUES ($1, $2, $3, $4)`,
-        [userId, reviewerId, decision, String(reason).trim() || null]
-      );
-    }
 
     await client.query("COMMIT");
 
@@ -333,7 +336,7 @@ async function reviewRegistration(req, res, next) {
       success: true,
       message:
         decision === "approved"
-          ? "Registration approved and access assigned."
+          ? "Registration approved and role assigned."
           : "Registration rejected.",
     });
   } catch (error) {
@@ -341,15 +344,18 @@ async function reviewRegistration(req, res, next) {
       try {
         await client.query("ROLLBACK");
       } catch (_) {
-        // Keep the original error.
+        // Preserve the original error.
       }
     }
 
     return next(error);
   } finally {
-    if (client) client.release();
+    if (client) {
+      client.release();
+    }
   }
 }
+
 
 function createAdminRegistrationController() {
   return {
