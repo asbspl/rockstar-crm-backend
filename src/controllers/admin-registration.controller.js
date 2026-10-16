@@ -1,15 +1,36 @@
 
 const pool = require("../config/db");
 
+
 async function listRegistrations(req, res, next) {
   try {
-    const status = req.query.status || "pending";
+    const status = req.query.status;
 
-    if (!["pending", "approved", "rejected"].includes(status)) {
+    const allowedStatuses = [
+      "pending",
+      "approved",
+      "rejected",
+    ];
+
+    if (
+      status !== undefined &&
+      !allowedStatuses.includes(status)
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Invalid registration status.",
+        message:
+          "Invalid registration status. Use pending, approved, rejected, or omit status for all.",
       });
+    }
+
+    const values = [];
+    let statusFilter = "";
+
+    // If a status is supplied, filter by that status.
+    // If omitted, return all non-deleted registrations.
+    if (status) {
+      values.push(status);
+      statusFilter = "AND u.account_status = $1";
     }
 
     const result = await pool.query(
@@ -23,7 +44,10 @@ async function listRegistrations(req, res, next) {
          COALESCE(
            (
              SELECT json_agg(
-               json_build_object('id', r.id, 'name', r.name)
+               json_build_object(
+                 'id', r.id,
+                 'name', r.name
+               )
              )
              FROM public.user_roles ur
              JOIN public.roles r ON r.id = ur.role_id
@@ -33,16 +57,20 @@ async function listRegistrations(req, res, next) {
          ) AS roles
        FROM public.users u
        WHERE u.is_deleted = FALSE
-         AND u.account_status = $1
+         ${statusFilter}
        ORDER BY u.created_at DESC`,
-      [status]
+      values
     );
 
-    return res.json({ success: true, data: result.rows });
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
   } catch (error) {
     next(error);
   }
 }
+
 
 async function getRegistration(req, res, next) {
   try {
@@ -63,16 +91,39 @@ async function getRegistration(req, res, next) {
          u.status,
          u.account_status,
          u.created_at,
+
+         COALESCE(
+           (
+             SELECT json_agg(
+               json_build_object(
+                 'id', r.id,
+                 'name', r.name
+               )
+               ORDER BY r.name
+             )
+             FROM public.user_roles ur
+             JOIN public.roles r
+               ON r.id = ur.role_id
+             WHERE ur.user_id = u.id
+           ),
+           '[]'::json
+         ) AS roles,
+
          to_jsonb(profile) AS profile,
          to_jsonb(kyc) AS kyc,
          to_jsonb(bank) AS bank
+
        FROM public.users u
+
        LEFT JOIN public.user_profiles profile
          ON profile.user_id = u.id
+
        LEFT JOIN public.user_kyc kyc
          ON kyc.user_id = u.id
+
        LEFT JOIN public.user_bank_accounts bank
          ON bank.user_id = u.id
+
        WHERE u.id = $1
          AND u.is_deleted = FALSE`,
       [id]
@@ -85,11 +136,15 @@ async function getRegistration(req, res, next) {
       });
     }
 
-    return res.json({ success: true, data: result.rows[0] });
+    return res.json({
+      success: true,
+      data: result.rows[0],
+    });
   } catch (error) {
     next(error);
   }
 }
+
 
 async function listRoles(req, res, next) {
   try {

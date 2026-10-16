@@ -167,23 +167,57 @@ function createUserService(config) {
       return { userId, roles };
     },
 
-    async assignUserRoles(currentUserId, userId, roleCodes) {
-      if (String(currentUserId) === String(userId)) {
-        throw new ApiError(403, "Administrators cannot modify their own privileged roles through the ordinary role assignment API");
-      }
+async assignUserRoles(currentUserId, userId, roleCodes) {
+  // Do not allow administrators to change their own privileged roles.
+  if (String(currentUserId) === String(userId)) {
+    throw new ApiError(
+      403,
+      "You cannot change your own privileged roles"
+    );
+  }
 
-      const roleIds = [];
-      const normalized = normalizeRoleCodes(roleCodes);
-      for (const code of normalized) {
-        const roleId = await userModel.getRoleIdByCode(code);
-        if (!roleId) {
-          throw new ApiError(400, `Role not found: ${code}`);
-        }
-        roleIds.push(roleId);
-      }
-      await userModel.assignRolesToUser(userId, roleIds);
-      return { userId, roles: normalized };
-    },
+  const normalized = normalizeRoleCodes(roleCodes);
+
+  if (normalized.length === 0) {
+    throw new ApiError(400, "Select at least one role");
+  }
+
+  // Confirm the user exists and has already been approved.
+  const user = await userModel.findById(userId);
+
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
+  if (user.account_status !== "approved") {
+    throw new ApiError(
+      409,
+      "Roles can only be updated for approved users"
+    );
+  }
+
+  // Convert role codes to database role IDs.
+  const roleIds = [];
+
+  for (const code of normalized) {
+    const roleId = await userModel.getRoleIdByCode(code);
+
+    if (!roleId) {
+      throw new ApiError(400, `Role not found: ${code}`);
+    }
+
+    roleIds.push(Number(roleId));
+  }
+
+  // Replace the complete role assignment.
+  await userModel.assignRolesToUser(userId, roleIds);
+
+  return {
+    userId,
+    assignedRoleCodes: normalized,
+    message: "User roles updated successfully",
+  };
+},
 
     async getUser(userId) {
       const profile = await userModel.getUserProfile(userId);
