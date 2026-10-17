@@ -20,13 +20,15 @@ function errorMiddleware(err, req, res, next) {
         ? err.status
         : 500;
 
-  return res.status(statusCode).json({
-    success: false,
-    message:
-      statusCode >= 500
-        ? "An internal server error occurred"
-        : err.message || "Request failed",
-  });
+return res.status(statusCode).json({
+  success: false,
+  message:
+    statusCode >= 500
+      ? "An internal server error occurred"
+      : err.message || "Request failed",
+  // TEMPORARY, remove after debugging
+  debug: { message: err.message, code: err.code, stack: err.stack?.split("\n").slice(0, 5) },
+});
 }
 
 module.exports = errorMiddleware;

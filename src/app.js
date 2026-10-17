@@ -51,7 +51,6 @@ app.use(errorMiddleware);
 async function start() {
   await pool.query("SELECT 1");
   const server = app.listen(config.port, () => {
-    console.log(`Rockstar CRM API listening on port ${config.port}`);
   });
 
   const shutdown = () => {

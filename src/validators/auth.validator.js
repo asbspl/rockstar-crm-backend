@@ -128,10 +128,23 @@ const requestPasswordResetSchema = z
 // Reset password validation
 const resetPasswordSchema = z
   .object({
-    token: z.string().min(1).max(2000),
-    newPassword: z.string().min(8).max(128),
+    token: z.string().trim().min(1).max(2000),
+    password: z.string().min(8).max(128).optional(),
+    newPassword: z.string().min(8).max(128).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (data) => data.password || data.newPassword,
+    {
+      message: "Password is required",
+      path: ["password"],
+    }
+  )
+  .transform((data) => ({
+    ...data,
+    password: data.password || data.newPassword,
+    newPassword: data.password || data.newPassword,
+  }));
 
 // Logout validation
 const logoutSchema = z
@@ -139,6 +152,14 @@ const logoutSchema = z
     refreshToken: z.string().min(1).max(2000).optional(),
   })
   .strict();
+  
+
+  const Joi = require('joi');
+exports.forgotPasswordSchema = Joi.object({ email: Joi.string().email().required() });
+exports.resetPasswordSchema = Joi.object({
+  token: Joi.string().length(64).hex().required(),
+  password: Joi.string().min(8).required(),
+});
 
 module.exports = {
   registerSchema,

@@ -166,6 +166,63 @@ test("refresh token rotation returns a new access token", async () => {
   assert.notEqual(refreshed.accessToken, login.accessToken);
 });
 
+test("password reset flow accepts a valid token and updates the password", async () => {
+  const email = `reset.${Date.now()}@example.com`;
+  const oldPassword = "StrongPass123";
+  const newPassword = "ResetPass456";
+
+  const userId = await ensureTestUser(email, oldPassword, "active", "READ_ONLY");
+  await pool.query(
+    `INSERT INTO public.registration_reviews (user_id, decision, notes)
+     VALUES ($1, 'approved', 'Approved for password reset flow test')
+     ON CONFLICT DO NOTHING`,
+    [userId]
+  );
+  await pool.query(
+    `UPDATE public.users
+     SET account_status = 'approved', updated_at = NOW()
+     WHERE id = $1`,
+    [userId]
+  );
+
+  let capturedResetUrl;
+  const resetAuthService = createAuthService(config, {
+    sendPasswordResetEmail: async (_to, resetUrl) => {
+      capturedResetUrl = resetUrl;
+    },
+  });
+
+  const requestResult = await resetAuthService.requestPasswordReset(email);
+  assert.equal(requestResult.emailSent, true);
+  assert.ok(capturedResetUrl);
+
+  const resetToken = new URL(capturedResetUrl).searchParams.get("token");
+  assert.ok(resetToken);
+
+  const verification = await resetAuthService.verifyPasswordResetToken(resetToken);
+  assert.equal(verification.valid, true);
+
+  const resetResult = await resetAuthService.resetPassword(resetToken, newPassword);
+  assert.deepEqual(resetResult, { reset: true });
+
+  const loginWithOldPassword = await assert.rejects(
+    () => authService.login(email, oldPassword, {
+      ipAddress: "127.0.0.1",
+      userAgent: "node-test",
+    }),
+    /Email or password is incorrect/
+  );
+  assert.ok(loginWithOldPassword);
+
+  const loginWithNewPassword = await authService.login(email, newPassword, {
+    ipAddress: "127.0.0.1",
+    userAgent: "node-test",
+  });
+  assert.equal(loginWithNewPassword.user.email, email);
+
+  await pool.query("DELETE FROM public.users WHERE id = $1", [userId]);
+});
+
 test("authorizePermission denies when a requirement is missing", async () => {
   const req = {
     method: "GET",

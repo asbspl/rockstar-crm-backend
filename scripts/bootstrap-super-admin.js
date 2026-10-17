@@ -19,7 +19,6 @@ async function bootstrapSuperAdmin() {
   );
 
   if (existingUser.rowCount) {
-    console.log(`Super admin already exists for ${email}.`);
     await pool.end();
     return;
   }
@@ -36,8 +35,6 @@ async function bootstrapSuperAdmin() {
   if (roleId) {
     await pool.query(`INSERT INTO public.user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [userResult.rows[0].id, roleId]);
   }
-
-  console.log(`Super admin created: ${email}`);
   await pool.end();
 }
 
