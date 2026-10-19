@@ -6,9 +6,8 @@ const createDashboardRoutes = require("./dashboard.routes");
 const createUserRoutes = require("./users.routes");
 const createRolesRoutes = require("./roles.routes");
 const createPermissionsRoutes = require("./permissions.routes");
-const createAdminRegistrationRoutes = require(
-  "./admin-registration.routes"
-);
+const createAdminRegistrationRoutes = require("./admin-registration.routes");
+const companiesRoutes = require("./companies.routes");
 
 function createApiRoutes(config) {
   const router = express.Router();
@@ -29,10 +28,9 @@ function createApiRoutes(config) {
   router.use("/dashboard", createDashboardRoutes(config));
 
   // Admin registration review
-  router.use(
-    "/admin/registrations",
-    createAdminRegistrationRoutes(config)
-  );
+  router.use("/admin/registrations", createAdminRegistrationRoutes(config));
+
+  router.use("/companies", companiesRoutes);
 
   return router;
 }
