@@ -11,4 +11,5 @@ router.post("/", companyUpload, companyController.createCompany);
 router.put("/:id", companyUpload, companyController.updateCompany);
 router.delete("/:id", companyController.deleteCompany);
 
+
 module.exports = router;
