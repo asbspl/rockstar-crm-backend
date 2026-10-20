@@ -192,6 +192,95 @@ async function getPermissionsForUser(userId) {
   return result.rows.map((row) => row.key);
 }
 
+
+async function getPermissionsForUser(userId) {
+  const result = await pool.query(
+    `SELECT DISTINCT p.key
+     FROM public.permissions p
+     WHERE p.is_active = TRUE
+       AND (
+         EXISTS (
+           SELECT 1
+           FROM public.user_roles ur
+           JOIN public.roles r
+             ON r.id = ur.role_id
+            AND r.is_active = TRUE
+           JOIN public.role_permissions rp
+             ON rp.role_id = ur.role_id
+           WHERE ur.user_id = $1
+             AND rp.permission_id = p.id
+         )
+         OR EXISTS (
+           SELECT 1
+           FROM public.user_permissions up
+           WHERE up.user_id = $1
+             AND up.permission_id = p.id
+         )
+       )
+     ORDER BY p.key`,
+    [userId]
+  );
+
+  return result.rows.map((row) => row.key);
+}
+
+async function getDirectPermissionsForUser(userId) {
+  const result = await pool.query(
+    `SELECT p.id, p.key, p.name
+     FROM public.user_permissions up
+     JOIN public.permissions p ON p.id = up.permission_id
+     WHERE up.user_id = $1
+       AND p.is_active = TRUE
+     ORDER BY p.key`,
+    [userId]
+  );
+
+  return result.rows;
+}
+
+async function setDirectPermissionsForUser(userId, permissionIds, client = pool) {
+  const ids = [...new Set(
+    (permissionIds || []).map(Number)
+  )];
+
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new ApiError(400, "Invalid permission IDs");
+  }
+
+  if (ids.length) {
+    const validation = await client.query(
+      `SELECT id
+       FROM public.permissions
+       WHERE id = ANY($1::bigint[])
+         AND is_active = TRUE`,
+      [ids]
+    );
+
+    if (validation.rowCount !== ids.length) {
+      throw new ApiError(400, "One or more permissions are invalid or inactive");
+    }
+  }
+
+  await client.query(
+    `DELETE FROM public.user_permissions
+     WHERE user_id = $1`,
+    [userId]
+  );
+
+  if (ids.length) {
+    await client.query(
+      `INSERT INTO public.user_permissions (user_id, permission_id)
+       SELECT $1, permission_id
+       FROM UNNEST($2::bigint[]) AS permission_id
+       ON CONFLICT (user_id, permission_id) DO NOTHING`,
+      [userId, ids]
+    );
+  }
+
+  return ids;
+}
+
+
 async function getUserProfile(userId) {
   const result = await pool.query(
     `SELECT
@@ -1090,6 +1179,8 @@ module.exports = {
   // Roles and permissions
   getRolesForUser,
   getPermissionsForUser,
+  getDirectPermissionsForUser,
+  setDirectPermissionsForUser,
   assignRolesToUser,
   getRoleIdByCode,
   getAllRoles,

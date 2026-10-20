@@ -1,4 +1,5 @@
 const express = require("express");
+const path = require("path");
 const cors = require("cors");
 const helmet = require("helmet");
 const { getConfig } = require("./config/env");
@@ -8,10 +9,16 @@ const createApiRoutes = require("./routes");
 const ApiResponse = require("./utils/ApiResponse");
 const notFoundMiddleware = require("./middlewares/not-found.middleware");
 const errorMiddleware = require("./middlewares/error.middleware");
+const cookieParser = require("cookie-parser");
 
 const app = express();
+app.use(cookieParser());
 
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -34,6 +41,11 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 
 app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "../uploads"))
+);
 
 app.get("/", (req, res) => {
   res.json(new ApiResponse("Rockstar CRM API is running", {}));

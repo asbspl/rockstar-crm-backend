@@ -1,11 +1,19 @@
 
 const ApiResponse = require("../utils/ApiResponse");
 
+const REFRESH_COOKIE_NAME = "rockstar_refresh_token";
+
+const refreshCookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax",
+  path: "/api/auth",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+};
+
 function createAuthController(authService) {
   return {
-    // ========================================================
     // REGISTER
-    // ========================================================
     async register(req, res, next) {
       try {
         const data = await authService.register(req.body, req.files);
@@ -20,9 +28,7 @@ function createAuthController(authService) {
       }
     },
 
-    // ========================================================
     // LOGIN
-    // ========================================================
     async login(req, res, next) {
       try {
         const data = await authService.login(
@@ -34,35 +40,66 @@ function createAuthController(authService) {
           }
         );
 
+        if (!data?.accessToken || !data?.refreshToken) {
+          const error = new Error(
+            "Login did not return the required authentication tokens."
+          );
+          error.statusCode = 500;
+          return next(error);
+        }
+
+        // Store the refresh token in an HttpOnly cookie.
+        res.cookie(
+          REFRESH_COOKIE_NAME,
+          data.refreshToken,
+          refreshCookieOptions
+        );
+
+        // Return the access token to the frontend.
+        // Do not expose the refresh token in the JSON response.
+        const responseData = { ...data };
+        delete responseData.refreshToken;
+
         return res
           .status(200)
-          .json(new ApiResponse("Login successful", data));
+          .json(
+            new ApiResponse("Login successful", responseData)
+          );
       } catch (error) {
         return next(error);
       }
     },
 
-    // ========================================================
     // LOGOUT
-    // ========================================================
     async logout(req, res, next) {
       try {
+        const refreshToken =
+          req.cookies?.[REFRESH_COOKIE_NAME] ||
+          req.body?.refreshToken;
+
         const data = await authService.logout({
           userId: req.auth.userId,
-          refreshToken: req.body?.refreshToken,
+          refreshToken,
+        });
+
+        res.clearCookie(REFRESH_COOKIE_NAME, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "lax",
+          path: "/api/auth",
         });
 
         return res
           .status(200)
-          .json(new ApiResponse("Logged out successfully", data));
+          .json(
+            new ApiResponse("Logged out successfully", data)
+          );
       } catch (error) {
         return next(error);
       }
     },
 
-    // ========================================================
     // CURRENT USER
-    // ========================================================
     async me(req, res, next) {
       try {
         const data = await authService.getCurrentUser(req.auth.userId);
@@ -80,9 +117,7 @@ function createAuthController(authService) {
       }
     },
 
-    // ========================================================
     // REGISTRATION STATUS
-    // ========================================================
     async registrationStatus(req, res, next) {
       try {
         const data = await authService.getRegistrationStatus(
@@ -102,32 +137,63 @@ function createAuthController(authService) {
       }
     },
 
-    // ========================================================
     // REFRESH ACCESS TOKEN
-    // ========================================================
     async refresh(req, res, next) {
       try {
         const refreshToken =
-          req.body?.refreshToken || req.cookies?.refresh_token;
+          req.cookies?.[REFRESH_COOKIE_NAME] ||
+          req.body?.refreshToken;
 
-        const data = await authService.refreshAccessToken(refreshToken, {
-          ipAddress: req.ip,
-          userAgent: req.get("user-agent") || "unknown",
-        });
+        if (!refreshToken) {
+          const error = new Error(
+            "Refresh token is missing. Please log in again."
+          );
+          error.statusCode = 401;
+          return next(error);
+        }
+
+        const data = await authService.refreshAccessToken(
+          refreshToken,
+          {
+            ipAddress: req.ip,
+            userAgent: req.get("user-agent") || "unknown",
+          }
+        );
+
+        if (!data?.accessToken || !data?.refreshToken) {
+          const error = new Error(
+            "Refresh service did not return the required tokens."
+          );
+          error.statusCode = 500;
+          return next(error);
+        }
+
+        // Replace the old refresh cookie with the rotated token.
+        res.cookie(
+          REFRESH_COOKIE_NAME,
+          data.refreshToken,
+          refreshCookieOptions
+        );
+
+        // The refresh token stays in the HttpOnly cookie.
+        const responseData = { ...data };
+        delete responseData.refreshToken;
+        delete responseData.token;
 
         return res
           .status(200)
           .json(
-            new ApiResponse("Token refreshed successfully", data)
+            new ApiResponse(
+              "Token refreshed successfully",
+              responseData
+            )
           );
       } catch (error) {
         return next(error);
       }
     },
 
-    // ========================================================
     // CHANGE PASSWORD
-    // ========================================================
     async changePassword(req, res, next) {
       try {
         const data = await authService.changePassword(
@@ -146,11 +212,7 @@ function createAuthController(authService) {
       }
     },
 
-    // ========================================================
     // REQUEST PASSWORD RESET
-    // POST /api/auth/forgot-password
-    // POST /api/auth/request-password-reset
-    // ========================================================
     async requestPasswordReset(req, res, next) {
       try {
         const email = String(req.body?.email || "")
@@ -168,11 +230,8 @@ function createAuthController(authService) {
           });
         }
 
-        // The service performs account eligibility checks,
-        // creates the token, stores it, and sends the email.
         const result = await authService.requestPasswordReset(email);
 
-        // The service must return a valid result.
         if (!result || typeof result !== "object") {
           const error = new Error(
             "The password reset service returned an invalid response."
@@ -181,7 +240,6 @@ function createAuthController(authService) {
           return next(error);
         }
 
-        // Never report success if the email utility indicates failure.
         if (result.emailSent !== true) {
           const error = new Error(
             result.message ||
@@ -212,10 +270,7 @@ function createAuthController(authService) {
       }
     },
 
-    // ========================================================
     // VERIFY PASSWORD RESET TOKEN
-    // GET /api/auth/verify-reset-token?token=...
-    // ========================================================
     async verifyResetToken(req, res, next) {
       try {
         const token = String(req.query?.token || "").trim();
@@ -235,10 +290,7 @@ function createAuthController(authService) {
       }
     },
 
-    // ========================================================
     // RESET PASSWORD
-    // POST /api/auth/reset-password
-    // ========================================================
     async resetPassword(req, res, next) {
       try {
         const newPassword =

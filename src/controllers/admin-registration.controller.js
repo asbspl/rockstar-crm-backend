@@ -1,20 +1,87 @@
 
 const pool = require("../config/db");
 
+const ALLOWED_STATUSES = ["pending", "approved", "rejected"];
+
+function isValidId(value) {
+  return (
+    /^\d+$/.test(String(value)) &&
+    Number.isSafeInteger(Number(value)) &&
+    Number(value) > 0
+  );
+}
+
+function validateIdArray(ids) {
+  return (
+    Array.isArray(ids) &&
+    ids.every(isValidId) &&
+    new Set(ids.map(String)).size === ids.length
+  );
+}
+
+async function validateSelectedIds(client, table, ids) {
+  // Table names are internal constants supplied by this controller.
+  const allowedTables = ["roles", "permissions"];
+
+  if (!allowedTables.includes(table)) {
+    throw new Error("Invalid validation table.");
+  }
+
+  if (ids.length === 0) {
+    return true;
+  }
+
+  const result = await client.query(
+    `SELECT id
+     FROM public.${table}
+     WHERE id::text = ANY($1::text[])`,
+    [ids.map(String)]
+  );
+
+  return result.rowCount === ids.length;
+}
+
+async function replaceUserRoles(client, userId, roleIds) {
+  await client.query(
+    `DELETE FROM public.user_roles
+     WHERE user_id = $1`,
+    [userId]
+  );
+
+  for (const roleId of roleIds) {
+    await client.query(
+      `INSERT INTO public.user_roles (user_id, role_id)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id, role_id) DO NOTHING`,
+      [userId, roleId]
+    );
+  }
+}
+
+async function replaceUserPermissions(client, userId, permissionIds) {
+  await client.query(
+    `DELETE FROM public.user_permissions
+     WHERE user_id = $1`,
+    [userId]
+  );
+
+  for (const permissionId of permissionIds) {
+    await client.query(
+      `INSERT INTO public.user_permissions (user_id, permission_id)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id, permission_id) DO NOTHING`,
+      [userId, permissionId]
+    );
+  }
+}
 
 async function listRegistrations(req, res, next) {
   try {
     const status = req.query.status;
 
-    const allowedStatuses = [
-      "pending",
-      "approved",
-      "rejected",
-    ];
-
     if (
       status !== undefined &&
-      !allowedStatuses.includes(status)
+      !ALLOWED_STATUSES.includes(status)
     ) {
       return res.status(400).json({
         success: false,
@@ -26,8 +93,6 @@ async function listRegistrations(req, res, next) {
     const values = [];
     let statusFilter = "";
 
-    // If a status is supplied, filter by that status.
-    // If omitted, return all non-deleted registrations.
     if (status) {
       values.push(status);
       statusFilter = "AND u.account_status = $1";
@@ -49,6 +114,7 @@ async function listRegistrations(req, res, next) {
                  'id', r.id,
                  'name', r.name
                )
+               ORDER BY r.name
              )
              FROM public.user_roles ur
              JOIN public.roles r ON r.id = ur.role_id
@@ -68,16 +134,15 @@ async function listRegistrations(req, res, next) {
       data: result.rows,
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 }
-
 
 async function getRegistration(req, res, next) {
   try {
     const { id } = req.params;
 
-    if (!/^\d+$/.test(id)) {
+    if (!isValidId(id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid registration ID.",
@@ -104,12 +169,31 @@ async function getRegistration(req, res, next) {
                ORDER BY r.name
              )
              FROM public.user_roles ur
-             JOIN public.roles r
-               ON r.id = ur.role_id
+             JOIN public.roles r ON r.id = ur.role_id
              WHERE ur.user_id = u.id
            ),
            '[]'::json
          ) AS roles,
+
+         COALESCE(
+           (
+             SELECT json_agg(ur.role_id ORDER BY ur.role_id)
+             FROM public.user_roles ur
+             WHERE ur.user_id = u.id
+           ),
+           '[]'::json
+         ) AS "roleIds",
+
+         COALESCE(
+           (
+             SELECT json_agg(
+               up.permission_id ORDER BY up.permission_id
+             )
+             FROM public.user_permissions up
+             WHERE up.user_id = u.id
+           ),
+           '[]'::json
+         ) AS "permissionIds",
 
          to_jsonb(profile) AS profile,
          to_jsonb(kyc) AS kyc,
@@ -143,55 +227,56 @@ async function getRegistration(req, res, next) {
       data: result.rows[0],
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 }
-
 
 async function listRoles(req, res, next) {
   try {
     const result = await pool.query(
-      `SELECT id, name
+      `SELECT id, code, name, description
        FROM public.roles
+       WHERE is_active = TRUE
        ORDER BY name`
     );
 
-    return res.json({ success: true, data: result.rows });
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 }
 
 async function listPermissions(req, res, next) {
   try {
-    // Resolve a display label from the actual row without requiring
-    // a permissions.code column.
     const result = await pool.query(
       `SELECT
          p.id,
+         p.key,
          COALESCE(
-           to_jsonb(p)->>'name',
-           to_jsonb(p)->>'permission_name',
-           to_jsonb(p)->>'title',
-           to_jsonb(p)->>'code',
-           to_jsonb(p)->>'key',
+           NULLIF(to_jsonb(p)->>'name', ''),
+           NULLIF(to_jsonb(p)->>'permission_name', ''),
+           NULLIF(to_jsonb(p)->>'title', ''),
+           NULLIF(to_jsonb(p)->>'display_name', ''),
+           p.key,
            p.id::text
          ) AS name,
-         COALESCE(
-           to_jsonb(p)->>'description',
-           to_jsonb(p)->>'display_name',
-           ''
-         ) AS description
+         COALESCE(p.description, '') AS description
        FROM public.permissions p
-       ORDER BY 2`
+       WHERE p.is_active = TRUE
+       ORDER BY 3`
     );
 
-    return res.json({ success: true, data: result.rows });
+    return res.json({
+      success: true,
+      data: result.rows,
+    });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 }
-
 
 async function reviewRegistration(req, res, next) {
   let client;
@@ -207,7 +292,7 @@ async function reviewRegistration(req, res, next) {
       permissionIds = [],
     } = req.body;
 
-    if (!/^\d+$/.test(userId) || Number(userId) <= 0) {
+    if (!isValidId(userId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid registration ID.",
@@ -228,30 +313,13 @@ async function reviewRegistration(req, res, next) {
       });
     }
 
-    if (!Array.isArray(roleIds) || !Array.isArray(permissionIds)) {
-      return res.status(400).json({
-        success: false,
-        message: "Role IDs and permission IDs must be arrays.",
-      });
-    }
-
-    const validIds = (ids) =>
-      ids.every(
-        (id) =>
-          /^\d+$/.test(String(id)) &&
-          Number.isSafeInteger(Number(id)) &&
-          Number(id) > 0
-      );
-
     if (
-      !validIds(roleIds) ||
-      !validIds(permissionIds) ||
-      new Set(roleIds.map(String)).size !== roleIds.length ||
-      new Set(permissionIds.map(String)).size !== permissionIds.length
+      !validateIdArray(roleIds) ||
+      !validateIdArray(permissionIds)
     ) {
       return res.status(400).json({
         success: false,
-        message: "Role and permission IDs must be valid and unique.",
+        message: "Role IDs and permission IDs must be valid, unique ID arrays.",
       });
     }
 
@@ -262,7 +330,10 @@ async function reviewRegistration(req, res, next) {
       });
     }
 
-    if (decision === "rejected" && !String(reason).trim()) {
+    if (
+      decision === "rejected" &&
+      !String(reason).trim()
+    ) {
       return res.status(400).json({
         success: false,
         message: "Provide a reason for rejection.",
@@ -300,14 +371,13 @@ async function reviewRegistration(req, res, next) {
     }
 
     if (decision === "approved") {
-      const rolesResult = await client.query(
-        `SELECT id
-         FROM public.roles
-         WHERE id::text = ANY($1::text[])`,
-        [roleIds.map(String)]
+      const rolesValid = await validateSelectedIds(
+        client,
+        "roles",
+        roleIds
       );
 
-      if (rolesResult.rowCount !== roleIds.length) {
+      if (!rolesValid) {
         await client.query("ROLLBACK");
 
         return res.status(400).json({
@@ -316,14 +386,13 @@ async function reviewRegistration(req, res, next) {
         });
       }
 
-      const permissionsResult = await client.query(
-        `SELECT id
-         FROM public.permissions
-         WHERE id::text = ANY($1::text[])`,
-        [permissionIds.map(String)]
+      const permissionsValid = await validateSelectedIds(
+        client,
+        "permissions",
+        permissionIds
       );
 
-      if (permissionsResult.rowCount !== permissionIds.length) {
+      if (!permissionsValid) {
         await client.query("ROLLBACK");
 
         return res.status(400).json({
@@ -332,28 +401,13 @@ async function reviewRegistration(req, res, next) {
         });
       }
 
-      // Remove existing role assignments.
-      await client.query(
-        `DELETE FROM public.user_roles
-         WHERE user_id = $1`,
-        [userId]
+      await replaceUserRoles(client, userId, roleIds);
+
+      await replaceUserPermissions(
+        client,
+        userId,
+        permissionIds
       );
-
-      // Assign every selected role.
-      for (const roleId of roleIds) {
-        await client.query(
-          `INSERT INTO public.user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT (user_id, role_id) DO NOTHING`,
-          [userId, roleId]
-        );
-      }
-
-      // This database uses role_permissions for role-based permissions.
-      // Do not query public.user_permissions because that table is absent.
-      //
-      // Selected permissionIds are validated above, but are not stored
-      // as individual user grants in this implementation.
 
       await client.query(
         `UPDATE public.users
@@ -374,7 +428,6 @@ async function reviewRegistration(req, res, next) {
       );
     }
 
-    // Record the decision using the existing registration_reviews table.
     await client.query(
       `INSERT INTO public.registration_reviews
          (user_id, reviewed_by, decision, notes, reviewed_at)
@@ -393,7 +446,7 @@ async function reviewRegistration(req, res, next) {
       success: true,
       message:
         decision === "approved"
-          ? "Registration approved and role assigned."
+          ? "Registration approved and roles and permissions saved."
           : "Registration rejected.",
     });
   } catch (error) {
@@ -413,6 +466,153 @@ async function reviewRegistration(req, res, next) {
   }
 }
 
+/**
+ * Update access for an already approved user.
+ * Expected body: { roleIds: number[], permissionIds: number[] }
+ */
+async function updateUserAccess(req, res, next) {
+  let client;
+
+  try {
+    const userId = req.params.id;
+    const reviewerId = req.auth?.userId;
+    const { roleIds, permissionIds } = req.body;
+
+    if (!isValidId(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user ID.",
+      });
+    }
+
+    if (!reviewerId) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication is required.",
+      });
+    }
+
+    if (
+      !validateIdArray(roleIds) ||
+      !validateIdArray(permissionIds)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "roleIds and permissionIds must be arrays of unique valid IDs.",
+      });
+    }
+
+    if (roleIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Select at least one role.",
+      });
+    }
+
+    if (String(userId) === String(reviewerId)) {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot change your own access using this endpoint.",
+      });
+    }
+
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const userResult = await client.query(
+      `SELECT id, account_status
+       FROM public.users
+       WHERE id = $1
+         AND is_deleted = FALSE
+       FOR UPDATE`,
+      [userId]
+    );
+
+    if (!userResult.rowCount) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    if (userResult.rows[0].account_status !== "approved") {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        success: false,
+        message: "Only approved users can have their access updated.",
+      });
+    }
+
+    const rolesValid = await validateSelectedIds(
+      client,
+      "roles",
+      roleIds
+    );
+
+    if (!rolesValid) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        success: false,
+        message: "One or more selected roles do not exist.",
+      });
+    }
+
+    const permissionsValid = await validateSelectedIds(
+      client,
+      "permissions",
+      permissionIds
+    );
+
+    if (!permissionsValid) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        success: false,
+        message: "One or more selected permissions do not exist.",
+      });
+    }
+
+    await replaceUserRoles(client, userId, roleIds);
+
+    await replaceUserPermissions(
+      client,
+      userId,
+      permissionIds
+    );
+
+    await client.query(
+      `UPDATE public.users
+       SET updated_at = NOW()
+       WHERE id = $1`,
+      [userId]
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      message: "User roles and permissions updated successfully.",
+    });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {
+        // Preserve the original error.
+      }
+    }
+
+    return next(error);
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+}
 
 function createAdminRegistrationController() {
   return {
@@ -421,6 +621,7 @@ function createAdminRegistrationController() {
     listRoles,
     listPermissions,
     reviewRegistration,
+    updateUserAccess,
   };
 }
 
