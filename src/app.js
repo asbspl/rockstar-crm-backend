@@ -63,14 +63,18 @@ app.get("/api/health/db", async (req, res) => {
 });
 
 const employeesRoutes = require("./routes/employees.routes");
+const driversRoutes = require("./routes/drivers.routes");
 
 // After app is created:
 app.use("/uploads", express.static("uploads"));
 app.use("/api/employees", employeesRoutes);
+app.use("/api/drivers", driversRoutes);
 
 app.use("/api", createApiRoutes(config));
 app.use(notFoundMiddleware);
 app.use(errorMiddleware);
+
+
 
 async function start() {
   await pool.query("SELECT 1");
