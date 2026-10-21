@@ -47,6 +47,12 @@ app.use(
   express.static(path.join(__dirname, "../uploads"))
 );
 
+
+app.use(
+  "/uploads",
+  express.static(path.join(process.cwd(), "uploads"))
+);
+
 app.get("/", (req, res) => {
   res.json(new ApiResponse("Rockstar CRM API is running", {}));
 });
@@ -55,6 +61,12 @@ app.get("/api/health/db", async (req, res) => {
   await pool.query("SELECT 1");
   res.json(new ApiResponse("Database connection is healthy", { status: "ok" }));
 });
+
+const employeesRoutes = require("./routes/employees.routes");
+
+// After app is created:
+app.use("/uploads", express.static("uploads"));
+app.use("/api/employees", employeesRoutes);
 
 app.use("/api", createApiRoutes(config));
 app.use(notFoundMiddleware);
