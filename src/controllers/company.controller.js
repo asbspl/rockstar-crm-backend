@@ -58,6 +58,10 @@ function getCompanyData(body, files = {}, existing = null) {
     termsAndConditions: String(body.termsAndConditions).trim(),
     panNumber: String(body.panNumber).trim().toUpperCase(),
     gstNumber: String(body.gstNumber).trim().toUpperCase(),
+    status: String(
+      body.status || existing?.status || "active"
+    ).trim().toLowerCase(),
+
 
     // Keep the existing document path if no replacement is uploaded.
     companyLogo:

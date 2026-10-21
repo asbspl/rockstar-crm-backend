@@ -125,6 +125,7 @@ async function createCompany(data) {
   return result.rows[0];
 }
 
+
 async function updateCompany(id, data) {
   const result = await pool.query(
     `
@@ -147,34 +148,37 @@ async function updateCompany(id, data) {
         pan_document = $15,
         gst_number = $16,
         gst_certificate = $17,
+        status = $18,
         updated_at = NOW()
-      WHERE id = $18
+      WHERE id = $19
       RETURNING *
     `,
     [
-      data.companyName,
-      data.phone,
-      data.email,
-      data.addressLine1,
-      data.addressLine2 || null,
-      data.country,
-      data.state,
-      data.city,
-      data.pinCode,
-      data.companyLogo,
-      data.companySignature,
-      data.bankDetails,
-      data.termsAndConditions,
-      data.panNumber,
-      data.panDocument,
-      data.gstNumber,
-      data.gstCertificate,
-      id,
+      data.companyName,       // $1
+      data.phone,              // $2
+      data.email,              // $3
+      data.addressLine1,       // $4
+      data.addressLine2 || null, // $5
+      data.country,            // $6
+      data.state,              // $7
+      data.city,               // $8
+      data.pinCode,            // $9
+      data.companyLogo,        // $10
+      data.companySignature,   // $11
+      data.bankDetails,        // $12
+      data.termsAndConditions, // $13
+      data.panNumber,          // $14
+      data.panDocument,        // $15
+      data.gstNumber,          // $16
+      data.gstCertificate,     // $17
+      data.status || "active", // $18
+      id,                      // $19
     ]
   );
 
   return result.rows[0] || null;
 }
+
 
 async function deleteCompany(id) {
   const result = await pool.query(

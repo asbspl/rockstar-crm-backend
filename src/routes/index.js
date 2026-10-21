@@ -32,6 +32,10 @@ function createApiRoutes(config) {
 
   router.use("/companies", companiesRoutes);
 
+  const contractorRoutes = require("./contractors.routes");
+
+  router.use("/contractors", contractorRoutes);
+
   return router;
 }
 
