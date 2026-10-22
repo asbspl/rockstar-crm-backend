@@ -8,6 +8,10 @@ const createRolesRoutes = require("./roles.routes");
 const createPermissionsRoutes = require("./permissions.routes");
 const createAdminRegistrationRoutes = require("./admin-registration.routes");
 const companiesRoutes = require("./companies.routes");
+  const contractorRoutes = require("./contractors.routes");
+const locationsRoutes = require("./locations.routes");
+
+
 
 function createApiRoutes(config) {
   const router = express.Router();
@@ -32,9 +36,9 @@ function createApiRoutes(config) {
 
   router.use("/companies", companiesRoutes);
 
-  const contractorRoutes = require("./contractors.routes");
-
   router.use("/contractors", contractorRoutes);
+  
+router.use("/locations", locationsRoutes);
 
   return router;
 }
