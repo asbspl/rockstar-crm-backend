@@ -69,6 +69,7 @@ const driversRoutes = require("./routes/drivers.routes");
 app.use("/uploads", express.static("uploads"));
 app.use("/api/employees", employeesRoutes);
 app.use("/api/drivers", driversRoutes);
+app.use("/google-maps", require("./routes/google-maps.routes"));
 
 app.use("/api", createApiRoutes(config));
 app.use(notFoundMiddleware);
