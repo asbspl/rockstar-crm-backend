@@ -10,6 +10,7 @@ const createAdminRegistrationRoutes = require("./admin-registration.routes");
 const companiesRoutes = require("./companies.routes");
   const contractorRoutes = require("./contractors.routes");
 const locationsRoutes = require("./locations.routes");
+const clientsRoutes = require("./clients.routes");
 
 
 
@@ -39,6 +40,8 @@ function createApiRoutes(config) {
   router.use("/contractors", contractorRoutes);
   
 router.use("/locations", locationsRoutes);
+
+router.use("/clients", clientsRoutes);
 
   return router;
 }
