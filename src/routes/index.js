@@ -12,7 +12,8 @@ const companiesRoutes = require("./companies.routes");
 const locationsRoutes = require("./locations.routes");
 const clientsRoutes = require("./clients.routes");
 const customersRoutes = require("./customers.routes");
-
+const sitesRoutes = require("./sites.routes");
+const productsRoutes = require("./products.routes");
 
 
 function createApiRoutes(config) {
@@ -45,6 +46,11 @@ router.use("/locations", locationsRoutes);
 router.use("/clients", clientsRoutes);
 
 router.use("/customers", customersRoutes);
+
+router.use("/sites", sitesRoutes);
+
+router.use("/products", productsRoutes);
+
 
   return router;
 }
