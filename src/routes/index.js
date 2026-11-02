@@ -17,6 +17,7 @@ const productsRoutes = require("./products.routes");
 const rateMatricesRoutes = require("./rate-matrices.routes");
 const quotationRoutes = require("./quotations.routes");
 const orderRoutes = require("./order.routes");
+const activityRoutes = require("./activity.routes");
 
 
 function createApiRoutes(config) {
@@ -59,6 +60,8 @@ router.use("/rate-matrix", rateMatricesRoutes);
 router.use("/quotations", quotationRoutes);
 
 router.use("/orders", orderRoutes);
+
+router.use("/activity", activityRoutes);
 
   return router;
 }
