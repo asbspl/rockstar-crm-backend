@@ -2,6 +2,45 @@
 const pool = require("../config/db");
 
 const ALLOWED_STATUSES = ["pending", "approved", "rejected"];
+const PRIVILEGED_PERMISSION_PREFIXES = ["roles.", "permissions.", "modules."];
+const PRIVILEGED_PERMISSION_KEYS = new Set([
+  "users.approve",
+  "users.reject",
+  "users.suspend",
+  "users.assign_role",
+  "users.assign_permission",
+  "users.permissions.update",
+]);
+async function preventPrivilegeGrant(client, permissionIds, actorRoles) {
+  if (
+    (actorRoles || []).includes("SUPER_ADMIN") ||
+    permissionIds.length === 0
+  ) {
+    return;
+  }
+
+  const result = await client.query(
+    `SELECT key
+     FROM public.permissions
+     WHERE id = ANY($1::bigint[])`,
+    [permissionIds],
+  );
+
+  const privileged = result.rows.some(({ key }) =>
+    PRIVILEGED_PERMISSION_KEYS.has(key) ||
+    PRIVILEGED_PERMISSION_PREFIXES.some((prefix) =>
+      key.startsWith(prefix)
+    ) ||
+    key.startsWith("users.permissions."),
+  );
+
+  if (privileged) {
+    throw Object.assign(
+      new Error("Only a Super Admin can grant administrative permissions"),
+      { statusCode: 403 },
+    );
+  }
+}
 
 function isValidId(value) {
   return (
@@ -27,6 +66,13 @@ async function validateSelectedIds(client, table, ids) {
     throw new Error("Invalid validation table.");
   }
 
+async function validateSelectedIds(client, table, ids) {
+  const allowedTables = ["roles", "permissions"];
+
+  if (!allowedTables.includes(table)) {
+    throw new Error("Invalid validation table.");
+  }
+
   if (ids.length === 0) {
     return true;
   }
@@ -34,7 +80,22 @@ async function validateSelectedIds(client, table, ids) {
   const result = await client.query(
     `SELECT id
      FROM public.${table}
-     WHERE id::text = ANY($1::text[])`,
+     WHERE id::text = ANY($1::text[])
+       AND is_active = TRUE`,
+    [ids.map(String)]
+  );
+
+  return result.rowCount === ids.length;
+}
+  if (ids.length === 0) {
+    return true;
+  }
+
+  const result = await client.query(
+    `SELECT id
+     FROM public.${table}
+     WHERE id::text = ANY($1::text[])
+       AND is_active = TRUE`,
     [ids.map(String)]
   );
 
@@ -58,18 +119,38 @@ async function replaceUserRoles(client, userId, roleIds) {
   }
 }
 
-async function replaceUserPermissions(client, userId, permissionIds) {
+async function replaceUserPermissions(client, userId, permissionIds, roleIds) {
+  const defaults = await client.query(
+    `SELECT DISTINCT rp.permission_id
+     FROM public.role_permissions rp
+     JOIN public.permissions p ON p.id = rp.permission_id AND p.is_active = TRUE
+     WHERE rp.role_id = ANY($1::bigint[])`,
+    [roleIds],
+  );
+  const defaultIds = new Set(defaults.rows.map((row) => Number(row.permission_id)));
+  const selectedIds = new Set(permissionIds.map(Number));
+  const grantIds = permissionIds.filter((id) => !defaultIds.has(Number(id)));
+  const denyIds = [...defaultIds].filter((id) => !selectedIds.has(id));
+
   await client.query(
     `DELETE FROM public.user_permissions
      WHERE user_id = $1`,
     [userId]
   );
 
-  for (const permissionId of permissionIds) {
+  for (const permissionId of grantIds) {
     await client.query(
-      `INSERT INTO public.user_permissions (user_id, permission_id)
-       VALUES ($1, $2)
-       ON CONFLICT (user_id, permission_id) DO NOTHING`,
+      `INSERT INTO public.user_permissions (user_id, permission_id, effect)
+       VALUES ($1, $2, 'grant')
+       ON CONFLICT (user_id, permission_id) DO UPDATE SET effect = EXCLUDED.effect`,
+      [userId, permissionId]
+    );
+  }
+  for (const permissionId of denyIds) {
+    await client.query(
+      `INSERT INTO public.user_permissions (user_id, permission_id, effect)
+       VALUES ($1, $2, 'deny')
+       ON CONFLICT (user_id, permission_id) DO UPDATE SET effect = EXCLUDED.effect`,
       [userId, permissionId]
     );
   }
@@ -112,7 +193,8 @@ async function listRegistrations(req, res, next) {
              SELECT json_agg(
                json_build_object(
                  'id', r.id,
-                 'name', r.name
+                 'name', r.name,
+                 'code', r.code
                )
                ORDER BY r.name
              )
@@ -186,14 +268,107 @@ async function getRegistration(req, res, next) {
 
          COALESCE(
            (
-             SELECT json_agg(
-               up.permission_id ORDER BY up.permission_id
-             )
-             FROM public.user_permissions up
-             WHERE up.user_id = u.id
+             SELECT json_agg(DISTINCT effective.id ORDER BY effective.id)
+             FROM public.permissions effective
+             JOIN public.permission_modules effective_module
+               ON effective_module.id = effective.module_id
+              AND effective_module.is_active = TRUE
+             WHERE effective.is_active = TRUE
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM public.user_permissions denied
+                 WHERE denied.user_id = u.id
+                   AND denied.permission_id = effective.id
+                   AND denied.effect = 'deny'
+               )
+               AND (
+                 EXISTS (
+                   SELECT 1
+                   FROM public.user_roles effective_ur
+                   JOIN public.roles effective_role
+                     ON effective_role.id = effective_ur.role_id
+                    AND effective_role.is_active = TRUE
+                   JOIN public.role_permissions effective_rp
+                     ON effective_rp.role_id = effective_role.id
+                   WHERE effective_ur.user_id = u.id
+                     AND effective_rp.permission_id = effective.id
+                 )
+                 OR EXISTS (
+                   SELECT 1
+                   FROM public.user_permissions granted
+                   WHERE granted.user_id = u.id
+                     AND granted.permission_id = effective.id
+                     AND granted.effect = 'grant'
+                 )
+               )
            ),
            '[]'::json
          ) AS "permissionIds",
+
+         COALESCE(
+           (
+             SELECT json_agg(
+               json_build_object(
+                 'id', effective.id,
+                 'key', effective.key,
+                 'code', effective.key,
+                 'name', effective.name,
+                 'module', module.name
+               )
+               ORDER BY module.name, effective.key
+             )
+             FROM public.permissions effective
+             JOIN public.permission_modules module
+               ON module.id = effective.module_id
+              AND module.is_active = TRUE
+             WHERE effective.is_active = TRUE
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM public.user_permissions denied
+                 WHERE denied.user_id = u.id
+                   AND denied.permission_id = effective.id
+                   AND denied.effect = 'deny'
+               )
+               AND (
+                 EXISTS (
+                   SELECT 1
+                   FROM public.user_roles effective_ur
+                   JOIN public.roles effective_role
+                     ON effective_role.id = effective_ur.role_id
+                    AND effective_role.is_active = TRUE
+                   JOIN public.role_permissions effective_rp
+                     ON effective_rp.role_id = effective_role.id
+                   WHERE effective_ur.user_id = u.id
+                     AND effective_rp.permission_id = effective.id
+                 )
+                 OR EXISTS (
+                   SELECT 1
+                   FROM public.user_permissions granted
+                   WHERE granted.user_id = u.id
+                     AND granted.permission_id = effective.id
+                     AND granted.effect = 'grant'
+                 )
+               )
+           ),
+           '[]'::json
+         ) AS "effectivePermissions",
+
+         COALESCE(
+           (
+             SELECT json_agg(
+               json_build_object(
+                 'id', p.id,
+                 'key', p.key,
+                 'effect', up.effect
+               )
+               ORDER BY p.key
+             )
+             FROM public.user_permissions up
+             JOIN public.permissions p ON p.id = up.permission_id
+             WHERE up.user_id = u.id
+           ),
+           '[]'::json
+         ) AS "permissionOverrides",
 
          to_jsonb(profile) AS profile,
          to_jsonb(kyc) AS kyc,
@@ -255,6 +430,8 @@ async function listPermissions(req, res, next) {
       `SELECT
          p.id,
          p.key,
+         m.key AS "moduleKey",
+         m.name AS module,
          COALESCE(
            NULLIF(to_jsonb(p)->>'name', ''),
            NULLIF(to_jsonb(p)->>'permission_name', ''),
@@ -265,7 +442,9 @@ async function listPermissions(req, res, next) {
          ) AS name,
          COALESCE(p.description, '') AS description
        FROM public.permissions p
+       JOIN public.permission_modules m ON m.id = p.module_id
        WHERE p.is_active = TRUE
+         AND m.is_active = TRUE
        ORDER BY 3`
     );
 
@@ -303,6 +482,13 @@ async function reviewRegistration(req, res, next) {
       return res.status(401).json({
         success: false,
         message: "Reviewer authentication is required.",
+      });
+    }
+
+    if (String(userId) === String(reviewerId)) {
+      return res.status(403).json({
+        success: false,
+        message: "Administrators cannot approve their own account.",
       });
     }
 
@@ -386,6 +572,21 @@ async function reviewRegistration(req, res, next) {
         });
       }
 
+      const selectedRoles = await client.query(
+        "SELECT id, code FROM public.roles WHERE id = ANY($1::bigint[])",
+        [roleIds],
+      );
+      if (
+        selectedRoles.rows.some((role) => ["ADMIN", "SUPER_ADMIN"].includes(role.code)) &&
+        !(req.auth.roles || []).includes("SUPER_ADMIN")
+      ) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({
+          success: false,
+          message: "Only a Super Admin can assign administrator roles.",
+        });
+      }
+
       const permissionsValid = await validateSelectedIds(
         client,
         "permissions",
@@ -401,12 +602,14 @@ async function reviewRegistration(req, res, next) {
         });
       }
 
+      await preventPrivilegeGrant(client, permissionIds, req.auth.roles || []);
       await replaceUserRoles(client, userId, roleIds);
 
       await replaceUserPermissions(
         client,
         userId,
-        permissionIds
+        permissionIds,
+        roleIds,
       );
 
       await client.query(
@@ -509,6 +712,15 @@ async function updateUserAccess(req, res, next) {
       });
     }
 
+    if (
+      String(userId) === String(reviewerId)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You cannot change your own access using this endpoint.",
+      });
+    }
+
     if (String(userId) === String(reviewerId)) {
       return res.status(403).json({
         success: false,
@@ -576,12 +788,29 @@ async function updateUserAccess(req, res, next) {
       });
     }
 
+    const selectedRoles = await client.query(
+      "SELECT id, code FROM public.roles WHERE id = ANY($1::bigint[])",
+      [roleIds],
+    );
+    if (
+      selectedRoles.rows.some((role) => ["ADMIN", "SUPER_ADMIN"].includes(role.code)) &&
+      !(req.auth.roles || []).includes("SUPER_ADMIN")
+    ) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        success: false,
+        message: "Only a Super Admin can assign administrator roles.",
+      });
+    }
+    await preventPrivilegeGrant(client, permissionIds, req.auth.roles || []);
+
     await replaceUserRoles(client, userId, roleIds);
 
     await replaceUserPermissions(
       client,
       userId,
-      permissionIds
+      permissionIds,
+      roleIds,
     );
 
     await client.query(

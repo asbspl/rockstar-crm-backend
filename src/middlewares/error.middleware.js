@@ -1,14 +1,5 @@
 
 function errorMiddleware(err, req, res, next) {
-  console.error("API Error:", {
-    method: req.method,
-    path: req.originalUrl,
-    message: err.message,
-    code: err.code,
-    detail: err.detail,
-    stack: err.stack,
-  });
-
   if (res.headersSent) {
     return next(err);
   }
@@ -20,15 +11,34 @@ function errorMiddleware(err, req, res, next) {
         ? err.status
         : 500;
 
-return res.status(statusCode).json({
-  success: false,
-  message:
+  const message =
     statusCode >= 500
       ? "An internal server error occurred"
-      : err.message || "Request failed",
-  // TEMPORARY, remove after debugging
-  debug: { message: err.message, code: err.code, stack: err.stack?.split("\n").slice(0, 5) },
-});
+      : err.message || "Request failed";
+
+  if (statusCode >= 500) {
+    console.error("API Error:", {
+      method: req.method,
+      path: req.originalUrl,
+      statusCode,
+      operation: err.operation || "request",
+      message: err.message || message,
+      code: err.code || undefined,
+      stack: err.stack,
+    });
+  } else {
+    console.error("API Error:", {
+      method: req.method,
+      path: req.originalUrl,
+      statusCode,
+      message,
+    });
+  }
+
+  return res.status(statusCode).json({
+    success: false,
+    message,
+  });
 }
 
 module.exports = errorMiddleware;

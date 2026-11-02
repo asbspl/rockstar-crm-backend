@@ -11,8 +11,11 @@ async function ensureAuthTables() {
     "users",
     "roles",
     "permissions",
+    "permission_modules",
     "user_roles",
     "role_permissions",
+    "user_permissions",
+    "registration_reviews",
     "refresh_tokens",
     "password_reset_tokens",
   ];
@@ -42,6 +45,8 @@ async function ensureAuthTables() {
 // ============================================================
 
 async function ensureRequiredPermissions() {
+  await ensureAuthTables();
+
   const requiredPermissions = [
     { key: "dashboard.read", name: "Dashboard Read" },
     { key: "users.read", name: "Users Read" },
@@ -60,19 +65,36 @@ async function ensureRequiredPermissions() {
   ];
 
   for (const permission of requiredPermissions) {
+    const moduleKey = permission.key.split(".")[0];
+    const moduleName = moduleKey
+      .split("_")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+
+    await pool.query(
+      `INSERT INTO public.permission_modules (key, name)
+       VALUES ($1, $2)
+       ON CONFLICT (key) DO NOTHING`,
+      [moduleKey, moduleName]
+    );
+
     await pool.query(
       `INSERT INTO public.permissions
-         (key, name, description, is_active)
-       VALUES ($1, $2, $3, TRUE)
+         (key, name, description, module_id, is_active)
+       SELECT $1, $2, $3, m.id, TRUE
+       FROM public.permission_modules m
+       WHERE m.key = $4
        ON CONFLICT (key)
        DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
+         module_id = EXCLUDED.module_id,
          updated_at = NOW()`,
       [
         permission.key,
         permission.name,
         `${permission.name} permission.`,
+        moduleKey,
       ]
     );
   }
@@ -107,6 +129,19 @@ async function findById(id) {
        AND is_deleted = FALSE
      LIMIT 1`,
     [id]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getLatestRegistrationReview(userId) {
+  const result = await pool.query(
+    `SELECT decision, notes, created_at
+     FROM public.registration_reviews
+     WHERE user_id = $1
+     ORDER BY created_at DESC NULLS LAST, id DESC
+     LIMIT 1`,
+    [userId]
   );
 
   return result.rows[0] || null;
@@ -177,27 +212,18 @@ async function getRolesForUser(userId) {
 async function getPermissionsForUser(userId) {
   const result = await pool.query(
     `SELECT DISTINCT p.key
-     FROM public.user_roles ur
-     JOIN public.roles r
-       ON r.id = ur.role_id
-       AND r.is_active = TRUE
-     JOIN public.role_permissions rp ON rp.role_id = ur.role_id
-     JOIN public.permissions p ON p.id = rp.permission_id
-     WHERE ur.user_id = $1
-       AND p.is_active = TRUE
-     ORDER BY p.key`,
-    [userId]
-  );
-
-  return result.rows.map((row) => row.key);
-}
-
-
-async function getPermissionsForUser(userId) {
-  const result = await pool.query(
-    `SELECT DISTINCT p.key
      FROM public.permissions p
+     JOIN public.permission_modules m
+       ON m.id = p.module_id
+      AND m.is_active = TRUE
      WHERE p.is_active = TRUE
+       AND NOT EXISTS (
+         SELECT 1
+         FROM public.user_permissions denied
+         WHERE denied.user_id = $1
+           AND denied.permission_id = p.id
+           AND denied.effect = 'deny'
+       )
        AND (
          EXISTS (
            SELECT 1
@@ -215,7 +241,8 @@ async function getPermissionsForUser(userId) {
            FROM public.user_permissions up
            WHERE up.user_id = $1
              AND up.permission_id = p.id
-         )
+               AND up.effect = 'grant'
+           )
        )
      ORDER BY p.key`,
     [userId]
@@ -226,7 +253,7 @@ async function getPermissionsForUser(userId) {
 
 async function getDirectPermissionsForUser(userId) {
   const result = await pool.query(
-    `SELECT p.id, p.key, p.name
+    `SELECT p.id, p.key, p.name, up.effect
      FROM public.user_permissions up
      JOIN public.permissions p ON p.id = up.permission_id
      WHERE up.user_id = $1
@@ -299,17 +326,47 @@ async function getUserProfile(userId) {
          ARRAY[]::text[]
        ) AS roles,
        COALESCE(
-         ARRAY_AGG(DISTINCT p.key)
-           FILTER (WHERE p.key IS NOT NULL),
-         ARRAY[]::text[]
-       ) AS permissions
+           ARRAY(
+             SELECT DISTINCT effective.key
+             FROM public.permissions effective
+             JOIN public.permission_modules effective_module
+               ON effective_module.id = effective.module_id
+              AND effective_module.is_active = TRUE
+             WHERE effective.is_active = TRUE
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM public.user_permissions denied
+                 WHERE denied.user_id = u.id
+                   AND denied.permission_id = effective.id
+                   AND denied.effect = 'deny'
+               )
+               AND (
+                 EXISTS (
+                   SELECT 1
+                   FROM public.user_roles effective_ur
+                   JOIN public.roles effective_role
+                     ON effective_role.id = effective_ur.role_id
+                    AND effective_role.is_active = TRUE
+                   JOIN public.role_permissions effective_rp
+                     ON effective_rp.role_id = effective_role.id
+                   WHERE effective_ur.user_id = u.id
+                     AND effective_rp.permission_id = effective.id
+                 )
+                 OR EXISTS (
+                   SELECT 1
+                   FROM public.user_permissions granted
+                   WHERE granted.user_id = u.id
+                     AND granted.permission_id = effective.id
+                     AND granted.effect = 'grant'
+                 )
+               )
+           ),
+           ARRAY[]::text[]
+         ) AS permissions
      FROM public.users u
      LEFT JOIN public.user_roles ur ON ur.user_id = u.id
      LEFT JOIN public.roles r
-       ON r.id = ur.role_id AND r.is_active = TRUE
-     LEFT JOIN public.role_permissions rp ON rp.role_id = r.id
-     LEFT JOIN public.permissions p
-       ON p.id = rp.permission_id AND p.is_active = TRUE
+         ON r.id = ur.role_id AND r.is_active = TRUE
      WHERE u.id = $1
        AND u.is_deleted = FALSE
      GROUP BY
@@ -453,17 +510,6 @@ async function savePasswordResetTokenIfEligible(
 
     const user = userResult.rows[0];
 
-    const reviewResult = await client.query(
-      `SELECT decision
-       FROM public.registration_reviews
-       WHERE user_id = $1
-       ORDER BY created_at DESC NULLS LAST, id DESC
-       LIMIT 1`,
-      [userId]
-    );
-
-    const latestDecision = reviewResult.rows[0]?.decision ?? null;
-
     const isLocked =
       user.locked_until != null &&
       new Date(user.locked_until).getTime() > Date.now();
@@ -472,7 +518,6 @@ async function savePasswordResetTokenIfEligible(
       user.status === "active" &&
       user.account_status === "approved" &&
       user.is_deleted !== true &&
-      latestDecision === "approved" &&
       !isLocked;
 
     if (!eligible) {
@@ -624,17 +669,6 @@ async function consumePasswordResetToken(tokenHash, passwordHash) {
 
     const user = userResult.rows[0];
 
-    const registrationResult = await client.query(
-      `SELECT decision
-       FROM public.registration_reviews
-       WHERE user_id = $1
-       ORDER BY created_at DESC NULLS LAST, id DESC
-       LIMIT 1`,
-      [user.id]
-    );
-
-    const latestDecision = registrationResult.rows[0]?.decision ?? null;
-
     const isLocked =
       user.locked_until != null &&
       new Date(user.locked_until).getTime() > Date.now();
@@ -643,7 +677,6 @@ async function consumePasswordResetToken(tokenHash, passwordHash) {
       user.status === "active" &&
       user.account_status === "approved" &&
       user.is_deleted !== true &&
-      latestDecision === "approved" &&
       !isLocked;
 
     if (!eligible) {
@@ -730,10 +763,51 @@ async function listUsers() {
          ARRAY_AGG(DISTINCT r.code)
            FILTER (WHERE r.code IS NOT NULL),
          ARRAY[]::text[]
-       ) AS roles
+       ) AS roles,
+       COALESCE(
+         ARRAY(
+           SELECT DISTINCT effective.key
+           FROM public.permissions effective
+           JOIN public.permission_modules effective_module
+             ON effective_module.id = effective.module_id
+            AND effective_module.is_active = TRUE
+           WHERE effective.is_active = TRUE
+             AND NOT EXISTS (
+               SELECT 1
+               FROM public.user_permissions denied
+               WHERE denied.user_id = u.id
+                 AND denied.permission_id = effective.id
+                 AND denied.effect = 'deny'
+             )
+             AND (
+               EXISTS (
+                 SELECT 1
+                 FROM public.user_roles effective_ur
+                 JOIN public.roles effective_role
+                   ON effective_role.id = effective_ur.role_id
+                  AND effective_role.is_active = TRUE
+                 JOIN public.role_permissions effective_rp
+                   ON effective_rp.role_id = effective_role.id
+                 WHERE effective_ur.user_id = u.id
+                   AND effective_rp.permission_id = effective.id
+               )
+               OR EXISTS (
+                 SELECT 1
+                 FROM public.user_permissions granted
+                 WHERE granted.user_id = u.id
+                   AND granted.permission_id = effective.id
+                   AND granted.effect = 'grant'
+               )
+             )
+         ),
+         ARRAY[]::text[]
+       ) AS permissions
      FROM public.users u
      LEFT JOIN public.user_roles ur ON ur.user_id = u.id
-     LEFT JOIN public.roles r ON r.id = ur.role_id
+     LEFT JOIN public.roles r
+       ON r.id = ur.role_id
+      AND r.is_active = TRUE
+     WHERE u.is_deleted = FALSE
      GROUP BY
        u.id, u.email, u.full_name, u.status, u.account_status,
        u.created_at, u.updated_at
@@ -1168,6 +1242,7 @@ module.exports = {
   // Users
   findByEmail,
   findById,
+  getLatestRegistrationReview,
   findPasswordResetUserByEmail,
   getUserProfile,
   getRegistrationStatus,
