@@ -36,7 +36,13 @@ function createUsersController(userService) {
 
     async approveApplication(req, res, next) {
       try {
-        const data = await userService.approveApplication(req.auth.userId, req.params.id, req.body);
+        const data = await userService.approveApplication(
+          req.auth.userId,
+          req.params.id,
+          req.body,
+          req.auth.roles,
+          req.auth.permissions,
+        );
         res.status(200).json(new ApiResponse("Application approved successfully", data));
       } catch (error) {
         next(error);
@@ -72,7 +78,13 @@ function createUsersController(userService) {
 
     async assignUserRoles(req, res, next) {
       try {
-        const data = await userService.assignUserRoles(req.auth.userId, req.params.id, req.body.roles);
+        const data = await userService.assignUserRoles(
+          req.auth.userId,
+          req.params.id,
+          req.body.roles,
+          req.auth.roles,
+          req.auth.permissions,
+        );
         res.status(200).json(new ApiResponse("User roles updated successfully", data));
       } catch (error) {
         next(error);

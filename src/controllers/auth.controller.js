@@ -55,15 +55,10 @@ function createAuthController(authService) {
           refreshCookieOptions
         );
 
-        // Return the access token to the frontend.
-        // Do not expose the refresh token in the JSON response.
-        const responseData = { ...data };
-        delete responseData.refreshToken;
-
         return res
           .status(200)
           .json(
-            new ApiResponse("Login successful", responseData)
+            new ApiResponse("Login successful", data)
           );
       } catch (error) {
         return next(error);
@@ -175,17 +170,12 @@ function createAuthController(authService) {
           refreshCookieOptions
         );
 
-        // The refresh token stays in the HttpOnly cookie.
-        const responseData = { ...data };
-        delete responseData.refreshToken;
-        delete responseData.token;
-
         return res
           .status(200)
           .json(
             new ApiResponse(
               "Token refreshed successfully",
-              responseData
+              data
             )
           );
       } catch (error) {

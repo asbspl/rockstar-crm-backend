@@ -3,14 +3,58 @@ const ApiError = require("../utils/ApiError");
 const userModel = require("../models/user.model");
 const pool = require("../config/db");
 
+const PRIVILEGED_PERMISSION_KEYS = new Set([
+  "users.approve",
+  "users.reject",
+  "users.suspend",
+  "users.assign_role",
+  "users.assign_permission",
+  "users.permissions.update",
+  "roles.create",
+  "roles.update",
+  "roles.assign",
+  "roles.delete",
+  "permissions.assign",
+  "permissions.create",
+  "permissions.update",
+  "permissions.deactivate",
+  "modules.manage",
+]);
+
 function normalizeRoleCodes(roleCodes) {
   const unique = [];
   for (const value of roleCodes || []) {
-    const code = String(value || "").trim();
+    const code = String(value || "").trim().toUpperCase();
     if (!code || unique.includes(code)) continue;
     unique.push(code);
   }
   return unique;
+}
+
+function validatePermissionIds(permissionIds) {
+  if (!Array.isArray(permissionIds)) {
+    throw new ApiError(400, "Permission IDs must be an array");
+  }
+  const ids = permissionIds.map(Number);
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0) || new Set(ids).size !== ids.length) {
+    throw new ApiError(400, "Permission IDs must be unique valid IDs");
+  }
+  return ids;
+}
+
+function assertCanGrantPermissions(permissionKeys, actorRoles, actorPermissions) {
+  if ((actorRoles || []).includes("SUPER_ADMIN")) return;
+  const actorPermissionSet = new Set(actorPermissions || []);
+  const elevated = permissionKeys.some((key) =>
+    PRIVILEGED_PERMISSION_KEYS.has(key) ||
+    key.startsWith("roles.") ||
+    key.startsWith("permissions.") ||
+    key.startsWith("modules.") ||
+    key.startsWith("users.permissions."),
+  );
+  if (elevated || permissionKeys.some((key) => !actorPermissionSet.has(key))) {
+    throw new ApiError(403, "You cannot grant permissions you do not have or administrative permissions");
+  }
 }
 
 function createUserService(config) {
@@ -24,6 +68,7 @@ function createUserService(config) {
         status: user.status,
         account_status: user.account_status || "pending",
         roles: user.roles || [],
+        permissions: user.permissions || [],
         created_at: user.created_at,
         updated_at: user.updated_at,
       }));
@@ -91,7 +136,7 @@ function createUserService(config) {
       };
     },
 
-    async approveApplication(currentUserId, applicationId, payload = {}) {
+    async approveApplication(currentUserId, applicationId, payload = {}, currentUserRoles = [], currentUserPermissions = []) {
       const application = await userModel.getApplicationById(applicationId);
       if (!application) throw new ApiError(404, "Application not found");
       if (String(application.id) === String(currentUserId)) {
@@ -107,14 +152,67 @@ function createUserService(config) {
       try {
         await client.query("BEGIN");
 
-        const roleIds = [];
-        for (const code of roleCodes) {
-          const roleId = await userModel.getRoleIdByCode(code);
-          if (!roleId) {
-            throw new ApiError(400, `Role not found: ${code}`);
-          }
-          roleIds.push(roleId);
+        const applicant = await client.query(
+          `SELECT id, account_status
+           FROM public.users
+           WHERE id = $1 AND is_deleted = FALSE
+           FOR UPDATE`,
+          [applicationId],
+        );
+        if (!applicant.rows[0]) throw new ApiError(404, "Application not found");
+        if (applicant.rows[0].account_status !== "pending") {
+          throw new ApiError(409, "This application has already been reviewed");
         }
+
+        const selectedRoles = await client.query(
+          `SELECT id, code FROM public.roles
+           WHERE code = ANY($1::text[]) AND is_active = TRUE`,
+          [roleCodes],
+        );
+        if (selectedRoles.rowCount !== roleCodes.length) {
+          throw new ApiError(400, "One or more selected roles are missing or inactive");
+        }
+        if (
+          selectedRoles.rows.some((role) => ["ADMIN", "SUPER_ADMIN"].includes(role.code)) &&
+          !currentUserRoles.includes("SUPER_ADMIN")
+        ) {
+          throw new ApiError(403, "Only a Super Admin can assign administrator roles");
+        }
+
+        const roleIds = selectedRoles.rows.map((role) => Number(role.id));
+        const defaults = await client.query(
+          `SELECT DISTINCT p.id, p.key
+           FROM public.role_permissions rp
+           JOIN public.permissions p ON p.id = rp.permission_id AND p.is_active = TRUE
+           JOIN public.permission_modules m ON m.id = p.module_id AND m.is_active = TRUE
+           WHERE rp.role_id = ANY($1::bigint[])`,
+          [roleIds],
+        );
+        const defaultIds = new Set(defaults.rows.map((permission) => Number(permission.id)));
+        const requestedIds = payload.permissionIds === undefined
+          ? [...defaultIds]
+          : validatePermissionIds(payload.permissionIds);
+        if (requestedIds.length) {
+          const validPermissions = await client.query(
+            `SELECT p.id, p.key
+             FROM public.permissions p
+             JOIN public.permission_modules m ON m.id = p.module_id AND m.is_active = TRUE
+             WHERE p.id = ANY($1::bigint[]) AND p.is_active = TRUE`,
+            [requestedIds],
+          );
+          if (validPermissions.rowCount !== requestedIds.length) {
+            throw new ApiError(400, "One or more selected permissions are missing or inactive");
+          }
+          assertCanGrantPermissions(
+            validPermissions.rows.map((permission) => permission.key),
+            currentUserRoles,
+            currentUserPermissions,
+          );
+        }
+
+        const requestedSet = new Set(requestedIds);
+        const grants = requestedIds.filter((id) => !defaultIds.has(id));
+        const denials = [...defaultIds].filter((id) => !requestedSet.has(id));
 
         await client.query(
           `UPDATE public.users
@@ -123,15 +221,46 @@ function createUserService(config) {
           [applicationId, currentUserId]
         );
 
-        await client.query(`DELETE FROM public.user_roles WHERE user_id = $1`, [applicationId]);
+        await client.query("DELETE FROM public.user_roles WHERE user_id = $1", [applicationId]);
         if (roleIds.length) {
-          const values = roleIds.map((roleId, index) => `($1, $${index + 2})`).join(", ");
-          await client.query(`INSERT INTO public.user_roles (user_id, role_id) VALUES ${values}`, [applicationId, ...roleIds]);
+          await client.query(
+            `INSERT INTO public.user_roles (user_id, role_id)
+             SELECT $1, role_id FROM UNNEST($2::bigint[]) AS role_id`,
+            [applicationId, roleIds],
+          );
         }
 
-        const review = await userModel.createRegistrationReview(applicationId, "approved", currentUserId, payload.notes || "Approved by administrator");
+        await client.query("DELETE FROM public.user_permissions WHERE user_id = $1", [applicationId]);
+        if (grants.length) {
+          await client.query(
+            `INSERT INTO public.user_permissions (user_id, permission_id, effect)
+             SELECT $1, permission_id, 'grant'
+             FROM UNNEST($2::bigint[]) AS permission_id`,
+            [applicationId, grants],
+          );
+        }
+        if (denials.length) {
+          await client.query(
+            `INSERT INTO public.user_permissions (user_id, permission_id, effect)
+             SELECT $1, permission_id, 'deny'
+             FROM UNNEST($2::bigint[]) AS permission_id`,
+            [applicationId, denials],
+          );
+        }
+        const review = await client.query(
+          `INSERT INTO public.registration_reviews (user_id, reviewed_by, decision, notes)
+           VALUES ($1, $2, 'approved', $3)
+           RETURNING id`,
+          [applicationId, currentUserId, payload.notes || "Approved by administrator"],
+        );
         await client.query("COMMIT");
-        return { id: applicationId, account_status: "approved", roles: roleCodes, reviewId: review.id };
+        return {
+          id: applicationId,
+          account_status: "approved",
+          roles: roleCodes,
+          reviewId: review.rows[0].id,
+          permissions: requestedIds,
+        };
       } catch (error) {
         await client.query("ROLLBACK");
         throw error;
@@ -167,7 +296,13 @@ function createUserService(config) {
       return { userId, roles };
     },
 
-async assignUserRoles(currentUserId, userId, roleCodes) {
+async assignUserRoles(
+  currentUserId,
+  userId,
+  roleCodes,
+  currentUserRoles = [],
+  currentUserPermissions = [],
+) {
   // Do not allow administrators to change their own privileged roles.
   if (String(currentUserId) === String(userId)) {
     throw new ApiError(
@@ -182,35 +317,67 @@ async assignUserRoles(currentUserId, userId, roleCodes) {
     throw new ApiError(400, "Select at least one role");
   }
 
-  // Confirm the user exists and has already been approved.
-  const user = await userModel.findById(userId);
-
-  if (!user) {
-    throw new ApiError(404, "User not found");
-  }
-
-  if (user.account_status !== "approved") {
-    throw new ApiError(
-      409,
-      "Roles can only be updated for approved users"
+  const client = await pool.connect();
+  let roleIds = [];
+  try {
+    await client.query("BEGIN");
+    const userResult = await client.query(
+      `SELECT id, account_status
+       FROM public.users
+       WHERE id = $1 AND is_deleted = FALSE
+       FOR UPDATE`,
+      [userId],
     );
-  }
-
-  // Convert role codes to database role IDs.
-  const roleIds = [];
-
-  for (const code of normalized) {
-    const roleId = await userModel.getRoleIdByCode(code);
-
-    if (!roleId) {
-      throw new ApiError(400, `Role not found: ${code}`);
+    const user = userResult.rows[0];
+    if (!user) throw new ApiError(404, "User not found");
+    if (user.account_status !== "approved") {
+      throw new ApiError(409, "Roles can only be updated for approved users");
     }
 
-    roleIds.push(Number(roleId));
-  }
+    const rolesResult = await client.query(
+      `SELECT id, code
+       FROM public.roles
+       WHERE code = ANY($1::text[]) AND is_active = TRUE`,
+      [normalized],
+    );
+    if (rolesResult.rowCount !== normalized.length) {
+      throw new ApiError(400, "One or more selected roles are missing or inactive");
+    }
+    if (
+      rolesResult.rows.some((role) => ["ADMIN", "SUPER_ADMIN"].includes(role.code)) &&
+      !currentUserRoles.includes("SUPER_ADMIN")
+    ) {
+      throw new ApiError(403, "Only a Super Admin can assign administrator roles");
+    }
 
-  // Replace the complete role assignment.
-  await userModel.assignRolesToUser(userId, roleIds);
+    roleIds = rolesResult.rows.map((role) => Number(role.id));
+    const rolePermissions = await client.query(
+      `SELECT DISTINCT p.key
+       FROM public.role_permissions rp
+       JOIN public.permissions p ON p.id = rp.permission_id AND p.is_active = TRUE
+       WHERE rp.role_id = ANY($1::bigint[])`,
+      [roleIds],
+    );
+    assertCanGrantPermissions(
+      rolePermissions.rows.map((permission) => permission.key),
+      currentUserRoles,
+      currentUserPermissions,
+    );
+    await client.query("DELETE FROM public.user_roles WHERE user_id = $1", [userId]);
+    if (roleIds.length) {
+      await client.query(
+        `INSERT INTO public.user_roles (user_id, role_id)
+         SELECT $1, role_id FROM UNNEST($2::bigint[]) AS role_id`,
+        [userId, roleIds],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 
   return {
     userId,
@@ -261,15 +428,6 @@ async assignUserRoles(currentUserId, userId, roleCodes) {
         accountStatus: payload.accountStatus || "approved",
       });
 
-      if (Array.isArray(payload.roles) && payload.roles.length) {
-        const roleIds = [];
-        for (const roleCode of payload.roles) {
-          const roleId = await userModel.getRoleIdByCode(roleCode);
-          if (roleId) roleIds.push(roleId);
-        }
-        await userModel.assignRolesToUser(user.id, roleIds);
-      }
-
       return this.getUser(user.id);
     },
 
@@ -284,15 +442,6 @@ async assignUserRoles(currentUserId, userId, roleCodes) {
         await userModel.updateUser(userId, allowedChanges);
       }
 
-      if (Array.isArray(payload.roles)) {
-        const roleIds = [];
-        for (const roleCode of payload.roles) {
-          const roleId = await userModel.getRoleIdByCode(roleCode);
-          if (roleId) roleIds.push(roleId);
-        }
-        await userModel.assignRolesToUser(userId, roleIds);
-      }
-
       return this.getUser(userId);
     },
 
@@ -301,7 +450,19 @@ async assignUserRoles(currentUserId, userId, roleCodes) {
         throw new ApiError(400, "Status must be a valid account status");
       }
 
-      const user = await userModel.updateUser(userId, { status, account_status: status === "active" ? "approved" : status });
+      const current = await userModel.findById(userId);
+      if (!current) {
+        throw new ApiError(404, "User not found");
+      }
+      const accountStatus = status === "active" || status === "inactive"
+        ? (status === "active" || current.account_status === "approved"
+          ? "approved"
+          : current.account_status)
+        : status;
+      const user = await userModel.updateUser(userId, {
+        status: status === "active" || status === "approved" ? "active" : "inactive",
+        account_status: accountStatus,
+      });
       if (!user) {
         throw new ApiError(404, "User not found");
       }

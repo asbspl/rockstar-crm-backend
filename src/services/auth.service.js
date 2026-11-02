@@ -57,6 +57,17 @@ function hashToken(token) {
     .digest("hex");
 }
 
+async function runLoginStep(operation, callback) {
+  try {
+    return await callback();
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.operation = `login.${operation}`;
+    }
+    throw error;
+  }
+}
+
 // ============================================================
 // ACCOUNT STATUS HELPERS
 // ============================================================
@@ -478,9 +489,13 @@ function createAuthService(config, dependencies = {}) {
         .trim()
         .toLowerCase();
 
-      await authModel.ensureRequiredPermissions();
+      await runLoginStep("ensure_required_permissions", () =>
+        authModel.ensureRequiredPermissions()
+      );
 
-      const user = await authModel.findByEmail(normalizedEmail);
+      const user = await runLoginStep("find_user_by_email", () =>
+        authModel.findByEmail(normalizedEmail)
+      );
 
       if (!user) {
         throw new ApiError(
@@ -489,9 +504,9 @@ function createAuthService(config, dependencies = {}) {
         );
       }
 
-      const passwordMatches = await bcrypt.compare(
-        password,
-        user.password_hash
+      const passwordMatches = await runLoginStep(
+        "compare_password",
+        () => bcrypt.compare(password, user.password_hash)
       );
 
       if (!passwordMatches) {
@@ -508,20 +523,41 @@ function createAuthService(config, dependencies = {}) {
         );
       }
 
-      const accountStatus = normalizeAccountStatus(
-        user.account_status
+      const latestReview = await runLoginStep(
+        "get_latest_registration_review",
+        () => authModel.getLatestRegistrationReview(user.id)
       );
+      const reviewDecision = String(latestReview?.decision || "").trim().toLowerCase();
+      const accountStatus = normalizeAccountStatus(user.account_status);
+      const hasBlockedReview = ["pending", "under_review", "rejected"].includes(reviewDecision);
 
-      if (accountStatus !== "approved") {
+      if (
+        accountStatus === "rejected" ||
+        accountStatus === "suspended" ||
+        (["pending", "under_review"].includes(accountStatus) && hasBlockedReview)
+      ) {
         throw new ApiError(
           401,
           getAccountStatusMessage(accountStatus)
         );
       }
 
-      const roles = await authModel.getRolesForUser(user.id);
-      const permissions = await authModel.getPermissionsForUser(
-        user.id
+      if (accountStatus === "pending" || accountStatus === "under_review") {
+        if (!latestReview || !hasBlockedReview) {
+          // Legacy users created before a review record existed may still be active and must be allowed.
+        } else {
+          throw new ApiError(
+            401,
+            getAccountStatusMessage(accountStatus)
+          );
+        }
+      }
+
+      const roles = await runLoginStep("get_roles", () =>
+        authModel.getRolesForUser(user.id)
+      );
+      const permissions = await runLoginStep("get_effective_permissions", () =>
+        authModel.getPermissionsForUser(user.id)
       );
 
       const safeUser = {
@@ -534,23 +570,27 @@ function createAuthService(config, dependencies = {}) {
         permissions,
       };
 
-      const accessToken = signAccessToken(safeUser, config);
-      const refreshToken = signRefreshToken(safeUser, config);
+      const accessToken = await runLoginStep("sign_access_token", () =>
+        signAccessToken(safeUser, config)
+      );
+      const refreshToken = await runLoginStep("sign_refresh_token", () =>
+        signRefreshToken(safeUser, config)
+      );
       const refreshHash = hashToken(refreshToken);
 
-      await authModel.saveRefreshToken(
-        user.id,
-        refreshHash,
-        {
+      await runLoginStep("save_refresh_token", () =>
+        authModel.saveRefreshToken(user.id, refreshHash, {
           expiresAt: new Date(
             Date.now() + 1000 * 60 * 60 * 24 * 7
           ),
           userAgent: metadata.userAgent || "unknown",
           ipAddress: metadata.ipAddress || null,
-        }
+        })
       );
 
-      await authModel.touchLastLogin(user.id);
+      await runLoginStep("touch_last_login", () =>
+        authModel.touchLastLogin(user.id)
+      );
 
       return {
         token: accessToken,
@@ -603,13 +643,6 @@ function createAuthService(config, dependencies = {}) {
       const accountStatus = normalizeAccountStatus(
         profile.account_status
       );
-
-      if (accountStatus !== "approved") {
-        throw new ApiError(
-          401,
-          getAccountStatusMessage(accountStatus)
-        );
-      }
 
       return {
         id: profile.id,
@@ -708,15 +741,31 @@ function createAuthService(config, dependencies = {}) {
         );
       }
 
-      const accountStatus = normalizeAccountStatus(
-        user.account_status
-      );
+      const latestReview = await authModel.getLatestRegistrationReview(user.id);
+      const reviewDecision = String(latestReview?.decision || "").trim().toLowerCase();
+      const accountStatus = normalizeAccountStatus(user.account_status);
+      const hasBlockedReview = ["pending", "under_review", "rejected"].includes(reviewDecision);
 
-      if (accountStatus !== "approved") {
+      if (
+        accountStatus === "rejected" ||
+        accountStatus === "suspended" ||
+        (["pending", "under_review"].includes(accountStatus) && hasBlockedReview)
+      ) {
         throw new ApiError(
           401,
           getAccountStatusMessage(accountStatus)
         );
+      }
+
+      if (accountStatus === "pending" || accountStatus === "under_review") {
+        if (!latestReview || !hasBlockedReview) {
+          // Legacy active accounts without an approval record can continue to use the app.
+        } else {
+          throw new ApiError(
+            401,
+            getAccountStatusMessage(accountStatus)
+          );
+        }
       }
 
       await authModel.revokeRefreshToken(
@@ -895,7 +944,11 @@ function createAuthService(config, dependencies = {}) {
         .trim()
         .toLowerCase();
 
-      if (reviewStatus === "rejected" || accountStatus === "rejected") {
+      if (
+        accountStatus === "rejected" ||
+        accountStatus === "suspended" ||
+        reviewStatus === "rejected"
+      ) {
         throw new ApiError(
           403,
           "Your registration request has been rejected. Please contact the administrator."
@@ -903,11 +956,10 @@ function createAuthService(config, dependencies = {}) {
       }
 
       if (
-        reviewStatus === "pending" ||
-        reviewStatus === "under_review" ||
-        !reviewStatus ||
         accountStatus === "pending" ||
-        accountStatus === "under_review"
+        accountStatus === "under_review" ||
+        reviewStatus === "pending" ||
+        reviewStatus === "under_review"
       ) {
         throw new ApiError(
           403,
@@ -916,7 +968,6 @@ function createAuthService(config, dependencies = {}) {
       }
 
       if (
-        reviewStatus !== "approved" ||
         accountStatus !== "approved" ||
         userStatus !== "active" ||
         user.is_deleted === true

@@ -146,6 +146,86 @@ test("inactive users cannot log in", async () => {
   await assert.rejects(() => authService.login(email, password), /disabled or inactive/);
 });
 
+test("pending and rejected accounts remain blocked from login", async () => {
+  const pendingEmail = `pending-login.${Date.now()}@example.com`;
+  const rejectedEmail = `rejected-login.${Date.now()}@example.com`;
+  const password = "StrongPass123";
+  const pendingUserId = await ensureTestUser(pendingEmail, password, "active", null);
+  const rejectedUserId = await ensureTestUser(rejectedEmail, password, "active", null);
+
+  try {
+    await pool.query(
+      `INSERT INTO public.registration_reviews (user_id, decision, notes)
+       VALUES ($1, 'pending', 'Pending login test')`,
+      [pendingUserId]
+    );
+    await pool.query(
+      `UPDATE public.users SET account_status = 'pending' WHERE id = $1`,
+      [pendingUserId]
+    );
+    await pool.query(
+      `INSERT INTO public.registration_reviews (user_id, decision, notes)
+       VALUES ($1, 'rejected', 'Rejected login test')`,
+      [rejectedUserId]
+    );
+    await pool.query(
+      `UPDATE public.users SET account_status = 'rejected' WHERE id = $1`,
+      [rejectedUserId]
+    );
+
+    await assert.rejects(
+      () => authService.login(pendingEmail, password),
+      /pending approval/
+    );
+    await assert.rejects(
+      () => authService.login(rejectedEmail, password),
+      /rejected/
+    );
+  } finally {
+    await pool.query(
+      "DELETE FROM public.users WHERE id = ANY($1::bigint[])",
+      [[pendingUserId, rejectedUserId]]
+    );
+  }
+});
+
+test("login includes effective permissions from roles and user overrides", async () => {
+  const email = `permission-overrides.${Date.now()}@example.com`;
+  const password = "StrongPass123";
+  const userId = await ensureTestUser(email, password, "active", null);
+
+  try {
+    await pool.query(
+      `UPDATE public.users SET account_status = 'approved' WHERE id = $1`,
+      [userId]
+    );
+    await pool.query(
+      `INSERT INTO public.registration_reviews (user_id, decision, notes)
+       VALUES ($1, 'approved', 'Permission override test')`,
+      [userId]
+    );
+    await pool.query(
+      `INSERT INTO public.user_permissions (user_id, permission_id, effect)
+       SELECT $1, p.id, overrides.effect
+       FROM public.permissions p
+       JOIN (VALUES
+         ('dashboard.read', 'grant'),
+         ('users.read', 'deny')
+       ) AS overrides(permission_key, effect)
+         ON p.key = overrides.permission_key`,
+      [userId]
+    );
+
+    const login = await authService.login(email, password);
+    assert.deepEqual(login.user.permissions, ["dashboard.read"]);
+
+    const refreshedPermissions = await userModel.getPermissionsForUser(userId);
+    assert.deepEqual(refreshedPermissions, ["dashboard.read"]);
+  } finally {
+    await pool.query("DELETE FROM public.users WHERE id = $1", [userId]);
+  }
+});
+
 test("refresh token rotation returns a new access token", async () => {
   const email = `refresh.${Date.now()}@example.com`;
   const password = "StrongPass123";
@@ -164,6 +244,94 @@ test("refresh token rotation returns a new access token", async () => {
   assert.ok(refreshed.accessToken);
   assert.ok(refreshed.refreshToken);
   assert.notEqual(refreshed.accessToken, login.accessToken);
+});
+
+test("HTTP login issues the refresh cookie and refresh/logout honor it", async () => {
+  const email = `cookie-flow.${Date.now()}@example.com`;
+  const password = "StrongPass123";
+  const userId = await ensureTestUser(email, password, "active", "READ_ONLY");
+
+  try {
+    await pool.query(
+      `UPDATE public.users SET account_status = 'approved' WHERE id = $1`,
+      [userId]
+    );
+    await pool.query(
+      `INSERT INTO public.registration_reviews (user_id, decision, notes)
+       VALUES ($1, 'approved', 'Cookie flow test')`,
+      [userId]
+    );
+
+    await withApiServer(async (baseUrl) => {
+      const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      assert.equal(loginResponse.status, 200);
+
+      const loginBody = await loginResponse.json();
+      const setCookie = loginResponse.headers.get("set-cookie");
+      assert.match(setCookie, /^rockstar_refresh_token=/);
+      assert.match(setCookie, /HttpOnly/i);
+      assert.match(setCookie, /SameSite=Lax/i);
+      assert.match(setCookie, /Path=\/api\/auth/i);
+      assert.ok(loginBody.data.accessToken);
+      const accessClaims = jwt.verify(loginBody.data.accessToken, config.jwtSecret, {
+        issuer: config.jwtIssuer,
+        audience: config.jwtAudience,
+      });
+      assert.equal(accessClaims.sub, String(userId));
+      assert.ok(loginBody.data.user.roles.includes("READ_ONLY"));
+      assert.ok(loginBody.data.user.permissions.includes("dashboard.read"));
+
+      const cookie = setCookie.split(";")[0];
+      const refreshResponse = await fetch(`${baseUrl}/api/auth/refresh`, {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(refreshResponse.status, 200);
+      const refreshedBody = await refreshResponse.json();
+      assert.ok(refreshedBody.data.accessToken);
+      const rotatedCookie = refreshResponse.headers.get("set-cookie");
+      assert.match(rotatedCookie, /^rockstar_refresh_token=/);
+
+      const logoutResponse = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${refreshedBody.data.accessToken}`,
+          cookie: rotatedCookie.split(";")[0],
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      assert.equal(logoutResponse.status, 200);
+      assert.match(
+        logoutResponse.headers.get("set-cookie"),
+        /^rockstar_refresh_token=;.*Expires=Thu, 01 Jan 1970/i
+      );
+    });
+
+    const userState = await pool.query(
+      `SELECT last_login_at
+       FROM public.users
+       WHERE id = $1`,
+      [userId]
+    );
+    assert.ok(userState.rows[0].last_login_at);
+    const refreshState = await pool.query(
+      `SELECT revoked_at
+       FROM public.refresh_tokens
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+    assert.ok(refreshState.rows[0].revoked_at);
+  } finally {
+    await pool.query("DELETE FROM public.users WHERE id = $1", [userId]);
+  }
 });
 
 test("password reset flow accepts a valid token and updates the password", async () => {
@@ -205,14 +373,13 @@ test("password reset flow accepts a valid token and updates the password", async
   const resetResult = await resetAuthService.resetPassword(resetToken, newPassword);
   assert.deepEqual(resetResult, { reset: true });
 
-  const loginWithOldPassword = await assert.rejects(
+  await assert.rejects(
     () => authService.login(email, oldPassword, {
       ipAddress: "127.0.0.1",
       userAgent: "node-test",
     }),
     /Email or password is incorrect/
   );
-  assert.ok(loginWithOldPassword);
 
   const loginWithNewPassword = await authService.login(email, newPassword, {
     ipAddress: "127.0.0.1",

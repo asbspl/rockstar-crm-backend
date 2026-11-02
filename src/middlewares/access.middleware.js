@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
+const userModel = require("../models/user.model");
 
 async function authenticateToken(req, res, next) {
   try {
@@ -71,27 +72,8 @@ function requirePermission(...requiredCodes) {
         });
       }
 
-      const result = await pool.query(
-        `SELECT DISTINCT p.code
-         FROM public.permissions p
-         WHERE p.code IN (
-           SELECT p2.code
-           FROM public.role_permissions rp
-           JOIN public.permissions p2 ON p2.id = rp.permission_id
-           JOIN public.user_roles ur ON ur.role_id = rp.role_id
-           WHERE ur.user_id = $1
-
-           UNION
-
-           SELECT p3.code
-           FROM public.user_permissions up
-           JOIN public.permissions p3 ON p3.id = up.permission_id
-           WHERE up.user_id = $1
-         )`,
-        [req.user.id]
-      );
-
-      const actual = new Set(result.rows.map((row) => row.code));
+      const permissions = await userModel.getPermissionsForUser(req.user.id);
+      const actual = new Set(permissions);
       const allowed = requiredCodes.every((code) => actual.has(code));
 
       if (!allowed) {
@@ -102,7 +84,7 @@ function requirePermission(...requiredCodes) {
         });
       }
 
-      req.user.permissions = [...actual];
+      req.user.permissions = permissions;
       next();
     } catch (error) {
       next(error);

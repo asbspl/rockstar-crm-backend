@@ -35,6 +35,12 @@ const passwordResetMigrationPath = path.join(
   "005_password_reset_tokens.sql"
 );
 
+const dynamicRbacMigrationPath = path.join(
+  __dirname,
+  "migrations",
+  "0019_dynamic_rbac.sql"
+);
+
 const expectedColumns = {
   id: {
     type: "bigint",
@@ -468,6 +474,9 @@ async function runMigration() {
         readMigration(passwordResetMigrationPath)
       );
 
+      // Migration 0019 preserves current assignments while adding modules and overrides.
+      await client.query(readMigration(dynamicRbacMigrationPath));
+
       await client.query("COMMIT");
 
       console.log(
@@ -482,6 +491,7 @@ async function runMigration() {
           "auth RBAC ready",
           "approval workflow ready",
           "password reset tokens ready",
+          "dynamic RBAC ready",
         ].join("; ") + "."
       );
 
@@ -505,12 +515,65 @@ async function runMigration() {
   }
 }
 
-runMigration().catch((error) => {
-  console.error(
-    "Migration failed:",
-    error.message,
-    error.code ? `(PostgreSQL ${error.code})` : ""
-  );
+async function runDynamicRbacMigration() {
+  let client;
 
-  process.exitCode = 1;
-});
+  try {
+    client = await databasePool.connect();
+    await client.query("BEGIN");
+
+    const prerequisites = await client.query(
+      `SELECT required.table_name,
+              to_regclass('public.' || required.table_name) AS relation
+       FROM UNNEST($1::text[]) AS required(table_name)`,
+      [[
+        "users",
+        "roles",
+        "permissions",
+        "user_roles",
+        "role_permissions",
+      ]]
+    );
+    const missingTables = prerequisites.rows
+      .filter((row) => !row.relation)
+      .map((row) => row.table_name);
+
+    if (missingTables.length) {
+      throw new Error(
+        `Dynamic RBAC migration prerequisites are missing: ${missingTables.join(", ")}`
+      );
+    }
+
+    await client.query(readMigration(dynamicRbacMigrationPath));
+    await client.query("COMMIT");
+    console.log("Dynamic RBAC migration verified successfully.");
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Dynamic RBAC migration rollback failed:", rollbackError.message);
+      }
+    }
+    throw error;
+  } finally {
+    if (client) client.release();
+    await databasePool.end();
+  }
+}
+
+if (require.main === module) {
+  const migration = process.argv.includes("--rbac-only")
+    ? runDynamicRbacMigration
+    : runMigration;
+
+  migration().catch((error) => {
+    console.error(
+      "Migration failed:",
+      error.message,
+      error.code ? `(PostgreSQL ${error.code})` : ""
+    );
+
+    process.exitCode = 1;
+  });
+}

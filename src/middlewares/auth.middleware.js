@@ -69,17 +69,6 @@ function createAuthMiddleware(config) {
       return next(new ApiError(401, "Account is disabled or inactive"));
     }
 
-    const normalizedAccountStatus = String(user.account_status || "").trim().toLowerCase();
-    const allowedStatuses = ["", "approved", "pending", "under_review"];
-    if (!allowedStatuses.includes(normalizedAccountStatus)) {
-      const messageMap = {
-        rejected: "Account has been rejected",
-        suspended: "Account is suspended",
-      };
-      logAuthenticationDenial(req, `account_status_${normalizedAccountStatus}`, config.nodeEnv);
-      return next(new ApiError(401, messageMap[normalizedAccountStatus] || "Account is not active"));
-    }
-
     try {
       const roles = await userModel.getRolesForUser(user.id);
       const permissions = await userModel.getPermissionsForUser(user.id);
@@ -122,6 +111,22 @@ function authorizeAnyPermission(permissionKeys) {
   };
 }
 
+function authorizeAllPermissions(permissionKeys) {
+  return function permissionMiddleware(req, res, next) {
+    const permissions = req.auth?.permissions || [];
+    if (!Array.isArray(permissionKeys) || permissionKeys.length === 0) {
+      logAuthorizationDenial(req, "invalid_permission_configuration");
+      return next(new ApiError(403, "Permission check is misconfigured"));
+    }
+    if (!permissionKeys.every((permissionKey) => permissions.includes(permissionKey))) {
+      logAuthorizationDenial(req, permissionKeys.join(","));
+      return next(new ApiError(403, "You do not have permission to access this resource"));
+    }
+    return next();
+  };
+}
+
 module.exports = createAuthMiddleware;
 module.exports.authorizePermission = authorizePermission;
 module.exports.authorizeAnyPermission = authorizeAnyPermission;
+module.exports.authorizeAllPermissions = authorizeAllPermissions;
