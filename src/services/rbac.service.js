@@ -617,7 +617,18 @@ function createRbacService() {
         await client.query("UPDATE public.users SET updated_at = NOW() WHERE id = $1", [id]);
         await client.query("COMMIT");
       } catch (error) {
-        await client.query("ROLLBACK");
+        if (error?.code && !error.operation) {
+          error.operation = "update user roles and permission overrides";
+        }
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackError) {
+          console.error("RBAC user access rollback failed:", {
+            operation: "rollback user access transaction",
+            message: rollbackError.message,
+            code: rollbackError.code || "unknown",
+          });
+        }
         throw error;
       } finally {
         client.release();

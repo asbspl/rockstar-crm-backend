@@ -35,6 +35,12 @@ const passwordResetMigrationPath = path.join(
   "005_password_reset_tokens.sql"
 );
 
+const auditLogsMigrationPath = path.join(
+  __dirname,
+  "migrations",
+  "0018_create_audit_logs.sql"
+);
+
 const dynamicRbacMigrationPath = path.join(
   __dirname,
   "migrations",
@@ -474,6 +480,8 @@ async function runMigration() {
         readMigration(passwordResetMigrationPath)
       );
 
+      await client.query(readMigration(auditLogsMigrationPath));
+
       // Migration 0019 preserves current assignments while adding modules and overrides.
       await client.query(readMigration(dynamicRbacMigrationPath));
 
@@ -491,6 +499,7 @@ async function runMigration() {
           "auth RBAC ready",
           "approval workflow ready",
           "password reset tokens ready",
+          "audit logs ready",
           "dynamic RBAC ready",
         ].join("; ") + "."
       );
@@ -562,10 +571,36 @@ async function runDynamicRbacMigration() {
   }
 }
 
+async function runAuditLogsMigration() {
+  let client;
+
+  try {
+    client = await databasePool.connect();
+    await client.query("BEGIN");
+    await client.query(readMigration(auditLogsMigrationPath));
+    await client.query("COMMIT");
+    console.log("Audit logs migration applied successfully.");
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Audit logs migration rollback failed:", rollbackError.message);
+      }
+    }
+    throw error;
+  } finally {
+    if (client) client.release();
+    await databasePool.end();
+  }
+}
+
 if (require.main === module) {
-  const migration = process.argv.includes("--rbac-only")
-    ? runDynamicRbacMigration
-    : runMigration;
+  const migration = process.argv.includes("--audit-only")
+    ? runAuditLogsMigration
+    : process.argv.includes("--rbac-only")
+      ? runDynamicRbacMigration
+      : runMigration;
 
   migration().catch((error) => {
     console.error(
