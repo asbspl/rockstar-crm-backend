@@ -24,6 +24,11 @@ function errorMiddleware(err, req, res, next) {
       operation: err.operation || "request",
       message: err.message || message,
       code: err.code || undefined,
+      detail: err.detail || undefined,
+      hint: err.hint || undefined,
+      table: err.table || undefined,
+      column: err.column || undefined,
+      constraint: err.constraint || undefined,
       stack: err.stack,
     });
   } else {

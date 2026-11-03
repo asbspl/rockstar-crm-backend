@@ -1,5 +1,6 @@
 
 const ApiResponse = require("../utils/ApiResponse");
+const { logActivity } = require("../services/activity.service");
 
 const REFRESH_COOKIE_NAME = "rockstar_refresh_token";
 
@@ -10,6 +11,32 @@ const refreshCookieOptions = {
   path: "/api/auth",
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
+
+async function recordAuthenticationActivity(
+  req,
+  user,
+  action,
+  description,
+  status = "SUCCESS"
+) {
+  try {
+    await logActivity({
+      req,
+      user,
+      action,
+      module: "Authentication",
+      entity_type: "User",
+      record_id: user?.id || req.auth?.userId || null,
+      description,
+      status,
+    });
+  } catch (error) {
+    console.error("AUDIT LOG ERROR: authentication activity could not be persisted", {
+      message: error.message,
+      code: error.code || "unknown",
+    });
+  }
+}
 
 function createAuthController(authService) {
   return {
@@ -48,6 +75,13 @@ function createAuthController(authService) {
           return next(error);
         }
 
+        await recordAuthenticationActivity(
+          req,
+          data.user,
+          "LOGIN",
+          `${data.user?.full_name || data.user?.name || "User"} logged in successfully`
+        );
+
         // Store the refresh token in an HttpOnly cookie.
         res.cookie(
           REFRESH_COOKIE_NAME,
@@ -61,6 +95,15 @@ function createAuthController(authService) {
             new ApiResponse("Login successful", data)
           );
       } catch (error) {
+        await recordAuthenticationActivity(
+          req,
+          {
+            email: String(req.body?.email || "").trim().toLowerCase() || null,
+          },
+          "LOGIN",
+          "Login attempt failed",
+          "FAILED"
+        );
         return next(error);
       }
     },
@@ -76,6 +119,13 @@ function createAuthController(authService) {
           userId: req.auth.userId,
           refreshToken,
         });
+
+        await recordAuthenticationActivity(
+          req,
+          req.auth.user,
+          "LOGOUT",
+          `${req.auth.user?.full_name || "User"} logged out successfully`
+        );
 
         res.clearCookie(REFRESH_COOKIE_NAME, {
           httpOnly: true,

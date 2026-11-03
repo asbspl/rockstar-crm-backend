@@ -1,26 +1,26 @@
 
 const express = require("express");
-
-const router = express.Router();
-
 const activityController = require("../controllers/activity.controller");
+const createAuthMiddleware = require("../middlewares/auth.middleware");
+const { authorizePermission } = require("../middlewares/auth.middleware");
 
-// IMPORTANT:
-// Attach your existing authentication middleware here.
-// Attach your existing RBAC permission middleware here.
-//
-// Required permission: activity.read
-//
-// Example integration:
-// router.use(yourExistingAuthMiddleware);
-// router.use(yourExistingPermissionMiddleware("activity.read"));
+function createActivityRoutes(config) {
+    const router = express.Router();
+    const authenticate = createAuthMiddleware(config);
 
-router.get("/", activityController.getActivities);
+    router.use(authenticate, authorizePermission("audit_logs.read"));
 
-router.get("/summary", activityController.getActivitySummary);
+    router.get("/", activityController.getActivities);
 
-router.get("/filters", activityController.getActivityFilters);
+    router.get("/summary", activityController.getActivitySummary);
 
-router.get("/:id", activityController.getActivityDetails);
+    router.get("/filters", activityController.getActivityFilters);
 
-module.exports = router;
+    router.post("/export", activityController.recordActivityExport);
+
+    router.get("/:id", activityController.getActivityDetails);
+
+    return router;
+}
+
+module.exports = createActivityRoutes;

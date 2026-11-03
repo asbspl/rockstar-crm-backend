@@ -10,6 +10,8 @@ const ApiResponse = require("./utils/ApiResponse");
 const notFoundMiddleware = require("./middlewares/not-found.middleware");
 const errorMiddleware = require("./middlewares/error.middleware");
 const cookieParser = require("cookie-parser");
+const createAuthMiddleware = require("./middlewares/auth.middleware");
+const { auditContextMiddleware } = require("./services/audit-context");
 
 const app = express();
 app.use(cookieParser());
@@ -41,6 +43,28 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 
 app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+
+const authenticateApiRequest = createAuthMiddleware(config);
+const routesWithOwnAuthentication = [
+  "/auth",
+  "/users",
+  "/roles",
+  "/permissions",
+  "/dashboard",
+  "/activity",
+  "/admin/registrations",
+];
+
+app.use("/api", auditContextMiddleware, (req, res, next) => {
+  if (
+    routesWithOwnAuthentication.some(
+      (route) => req.path === route || req.path.startsWith(`${route}/`)
+    )
+  ) {
+    return next();
+  }
+  return authenticateApiRequest(req, res, next);
+});
 
 app.use(
   "/uploads",

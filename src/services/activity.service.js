@@ -1,6 +1,9 @@
 
 const activityModel = require("../models/activity.model");
 
+const sensitiveFieldPattern =
+    /(password|token|authorization|cookie|secret|api[_-]?key|credential|private[_-]?key|aadhaar|aadhar|pan|bank|ifsc|account[_-]?number|document|file[_-]?path|photo)/i;
+
 const sanitizeObject = (value) => {
     if (!value || typeof value !== "object") {
         return value ?? null;
@@ -10,23 +13,9 @@ const sanitizeObject = (value) => {
         return value.map(sanitizeObject);
     }
 
-    const sensitiveFields = [
-        "password",
-        "new_password",
-        "current_password",
-        "confirm_password",
-        "access_token",
-        "refresh_token",
-        "token",
-        "authorization",
-        "cookie",
-        "secret",
-        "api_key",
-    ];
-
     return Object.fromEntries(
         Object.entries(value).map(([key, val]) => {
-            if (sensitiveFields.includes(key.toLowerCase())) {
+            if (sensitiveFieldPattern.test(key)) {
                 return [key, "[REDACTED]"];
             }
 
@@ -39,35 +28,36 @@ const logActivity = async ({
     req,
     action,
     module,
+    entity_type = null,
     record_id = null,
     description = "",
     old_values = null,
     new_values = null,
     status = "SUCCESS",
     error_message = null,
+    auditClient = null,
+    user: userOverride = null,
 }) => {
     try {
-        const user = req?.user || {};
-
-        const forwarded = req?.headers?.["x-forwarded-for"];
-
-        const ipAddress = forwarded
-            ? String(forwarded).split(",")[0].trim()
-            : req?.ip || req?.socket?.remoteAddress || null;
+        const user = userOverride || req?.auth?.user || req?.user || {};
+        const userId = req?.auth?.userId || user.id || user.user_id || null;
+        const ipAddress = req?.ip || req?.socket?.remoteAddress || null;
 
         return await activityModel.createActivity({
-            user_id: user.id || user.user_id || null,
+            user_id: userId,
 
             user_name:
                 user.full_name ||
                 user.name ||
-                null,
+                (userId ? null : "System"),
 
             user_email: user.email || null,
 
             action: String(action).toUpperCase(),
 
-            module: String(module).toUpperCase(),
+            module: String(module),
+
+            entity_type,
 
             record_id:
                 record_id === null
@@ -86,14 +76,14 @@ const logActivity = async ({
 
             request_method: req?.method || null,
 
-            request_url: req?.originalUrl || req?.url || null,
+            request_url: String(req?.originalUrl || req?.url || "").split("?")[0] || null,
 
             status: String(status).toUpperCase(),
 
             error_message: error_message
                 ? String(error_message).slice(0, 1000)
                 : null,
-        });
+        }, auditClient);
     } catch (error) {
         // Audit failures must be visible to server operators.
         console.error("AUDIT LOG ERROR:", error);

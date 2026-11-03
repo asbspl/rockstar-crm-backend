@@ -1,7 +1,11 @@
 
 const pool = require("../config/db");
 
-const createActivity = async (data) => {
+const createActivity = async (data, connection = pool) => {
+    // Use the supplied transaction connection when available.
+    // Otherwise, use the main PostgreSQL pool.
+    const db = connection || pool;
+
     const query = `
         INSERT INTO audit_logs (
             user_id,
@@ -9,6 +13,7 @@ const createActivity = async (data) => {
             user_email,
             action,
             module,
+            entity_type,
             record_id,
             description,
             old_values,
@@ -21,9 +26,9 @@ const createActivity = async (data) => {
             error_message
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7,
-            $8::jsonb, $9::jsonb, $10, $11,
-            $12, $13, $14, $15
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            $9::jsonb, $10::jsonb, $11, $12,
+            $13, $14, $15, $16
         )
         RETURNING *
     `;
@@ -34,6 +39,7 @@ const createActivity = async (data) => {
         data.user_email || null,
         data.action,
         data.module,
+        data.entity_type || null,
         data.record_id || null,
         data.description || null,
         JSON.stringify(data.old_values ?? null),
@@ -46,10 +52,11 @@ const createActivity = async (data) => {
         data.error_message || null,
     ];
 
-    const result = await pool.query(query, values);
+    const result = await db.query(query, values);
 
     return result.rows[0];
 };
+
 
 const getActivities = async ({
     page = 1,
@@ -61,6 +68,7 @@ const getActivities = async ({
     status,
     start_date,
     end_date,
+    entity_id,
 }) => {
     const conditions = [];
     const values = [];
@@ -97,6 +105,10 @@ const getActivities = async ({
         );
     }
 
+    if (entity_id) {
+        addCondition("record_id = ?", String(entity_id));
+    }
+
     if (search) {
         values.push(`%${search}%`);
 
@@ -128,7 +140,10 @@ const getActivities = async ({
 
     const dataResult = await pool.query(
         `
-        SELECT *
+        SELECT
+            id, user_id, user_name, user_email, action, module, entity_type,
+            record_id, description, old_values, new_values, ip_address,
+            user_agent, request_method, request_url, status, created_at
         FROM audit_logs
         ${whereClause}
         ORDER BY created_at DESC, id DESC
@@ -152,7 +167,10 @@ const getActivities = async ({
 const getActivityById = async (id) => {
     const result = await pool.query(
         `
-        SELECT *
+        SELECT
+            id, user_id, user_name, user_email, action, module, entity_type,
+            record_id, description, old_values, new_values, ip_address,
+            user_agent, request_method, request_url, status, created_at
         FROM audit_logs
         WHERE id = $1
         `,
@@ -200,6 +218,17 @@ const getAvailableFilters = async () => {
                 FROM audit_logs
                 ORDER BY module
             ) AS modules
+            ,
+            COALESCE((
+                SELECT jsonb_agg(users ORDER BY users.user_name)
+                FROM (
+                    SELECT DISTINCT ON (user_id)
+                        user_id::text AS user_id, user_name, user_email
+                    FROM audit_logs
+                    WHERE user_id IS NOT NULL
+                    ORDER BY user_id, created_at DESC, id DESC
+                ) AS users
+            ), '[]'::jsonb) AS users
     `);
 
     return result.rows[0];

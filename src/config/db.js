@@ -1,6 +1,7 @@
 
 const { Pool } = require("pg");
 const { getDatabaseConfig } = require("./env");
+const { trackPoolConnections } = require("../services/audit-query-tracker");
 
 const databaseConfig = getDatabaseConfig();
 
@@ -17,7 +18,7 @@ function createPool(database = databaseConfig.name) {
   pool.on("error", (error) => {
     console.error("Unexpected PostgreSQL pool error:", error.code || "unknown error");
   });
-  return pool;
+  return trackPoolConnections(pool);
 }
 
 const pool = createPool();
