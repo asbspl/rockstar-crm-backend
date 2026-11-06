@@ -2,12 +2,15 @@
 const ApiResponse = require("../utils/ApiResponse");
 const { logActivity } = require("../services/activity.service");
 
-const REFRESH_COOKIE_NAME = "rockstar_refresh_token";
+const { getConfig } = require("../config/env");
+const config = getConfig();
+
+const REFRESH_COOKIE_NAME = config.refreshCookieName;
 
 const refreshCookieOptions = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: "lax",
+  secure: config.refreshCookieSecure,
+  sameSite: config.refreshCookieSameSite,
   path: "/api/auth",
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
@@ -127,12 +130,12 @@ function createAuthController(authService) {
           `${req.auth.user?.full_name || "User"} logged out successfully`
         );
 
-        res.clearCookie(REFRESH_COOKIE_NAME, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === "production",
-          sameSite: "lax",
-          path: "/api/auth",
-        });
+res.clearCookie(REFRESH_COOKIE_NAME, {
+  httpOnly: true,
+  secure: config.refreshCookieSecure,
+  sameSite: config.refreshCookieSameSite,
+  path: "/api/auth",
+});
 
         return res
           .status(200)

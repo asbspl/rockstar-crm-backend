@@ -24,18 +24,14 @@ app.use(
 app.use(
   cors({
     origin: (origin, callback) => {
-      const allowedOrigins = [
-        config.frontendUrl,
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-      ]
-        .filter(Boolean)
-        .map((value) => value.replace(/\/+$/, ""));
-      if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) {
-        callback(null, true);
-        return;
+      if (
+        !origin ||
+        config.corsOrigins.includes(origin.replace(/\/+$/, ""))
+      ) {
+        return callback(null, true);
       }
-      callback(new Error("Origin not allowed by CORS policy"));
+
+      return callback(new Error("Origin not allowed by CORS policy"));
     },
     credentials: true,
   })
@@ -72,10 +68,10 @@ app.use(
 );
 
 
-app.use(
-  "/uploads",
-  express.static(path.join(process.cwd(), "uploads"))
-);
+// app.use(
+//   "/uploads",
+//   express.static(path.join(process.cwd(), "uploads"))
+// );
 
 app.get("/", (req, res) => {
   res.json(new ApiResponse("Rockstar CRM API is running", {}));
@@ -90,7 +86,7 @@ const employeesRoutes = require("./routes/employees.routes");
 const driversRoutes = require("./routes/drivers.routes");
 
 // After app is created:
-app.use("/uploads", express.static("uploads"));
+// app.use("/uploads", express.static("uploads"));
 app.use("/api/employees", employeesRoutes);
 app.use("/api/drivers", driversRoutes);
 app.use("/google-maps", require("./routes/google-maps.routes"));
