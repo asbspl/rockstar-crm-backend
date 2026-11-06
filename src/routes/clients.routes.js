@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 
 const controller = require("../controllers/clients.controller");
+const { authorizeModuleAction } = require("../middlewares/auth.middleware");
 
 const router = express.Router();
 
@@ -63,14 +64,13 @@ const clientUploads = upload.fields([
     { name: "visiting_card_back", maxCount: 1 },
 ]);
 
-// Add your existing authentication and RBAC middleware here.
 // Do not expose client identity documents through a public static URL.
 
-router.get("/", controller.list);
-router.get("/:id", controller.getById);
-router.post("/", clientUploads, controller.create);
-router.put("/:id", clientUploads, controller.update);
-router.patch("/:id/status", express.json(), controller.updateStatus);
-router.delete("/:id", controller.remove);
+router.get("/", authorizeModuleAction("clients", "read"), controller.list);
+router.get("/:id", authorizeModuleAction("clients", "read"), controller.getById);
+router.post("/", authorizeModuleAction("clients", "create"), clientUploads, controller.create);
+router.put("/:id", authorizeModuleAction("clients", "update"), clientUploads, controller.update);
+router.patch("/:id/status", authorizeModuleAction("clients", "update"), express.json(), controller.updateStatus);
+router.delete("/:id", authorizeModuleAction("clients", "delete"), controller.remove);
 
 module.exports = router;

@@ -547,9 +547,12 @@ function createRbacService() {
       const roleIds = normalizeIds(roleIdsValue, "Role IDs");
       const permissionIds = normalizeIds(permissionIdsValue, "Permission IDs");
       if (!Number.isSafeInteger(id) || id <= 0) throw new ApiError(400, "Invalid user ID");
-      if (String(actorId) === String(id)) {
-        throw new ApiError(403, "You cannot change your own roles or permissions");
-      }
+if (
+  String(actorId) === String(id) &&
+  !isSuperAdmin(actorRoles)
+) {
+  throw new ApiError(403, "You cannot change your own roles or permissions");
+}
 
       const client = await pool.connect();
       try {
