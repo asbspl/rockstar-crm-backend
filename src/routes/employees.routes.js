@@ -6,6 +6,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 
 const createEmployeesController = require("../controllers/employees.controller");
+const { authorizeModuleAction } = require("../middlewares/auth.middleware");
 
 const router = express.Router();
 const controller = createEmployeesController();
@@ -73,13 +74,13 @@ function validateId(req, res, next) {
 }
 
 // List and create.
-router.get("/", controller.list);
-router.post("/", employeeFiles, controller.create);
+router.get("/", authorizeModuleAction("employees", "read"), controller.list);
+router.post("/", authorizeModuleAction("employees", "create"), employeeFiles, controller.create);
 
 // Fetch and edit.
-router.get("/:id", validateId, controller.getById);
-router.put("/:id", validateId, employeeFiles, controller.update);
-router.patch("/:id/status", validateId, controller.updateStatus);
-router.delete("/:id", validateId, controller.remove);
+router.get("/:id", authorizeModuleAction("employees", "read"), validateId, controller.getById);
+router.put("/:id", authorizeModuleAction("employees", "update"), validateId, employeeFiles, controller.update);
+router.patch("/:id/status", authorizeModuleAction("employees", "update"), validateId, controller.updateStatus);
+router.delete("/:id", authorizeModuleAction("employees", "delete"), validateId, controller.remove);
 
 module.exports = router;

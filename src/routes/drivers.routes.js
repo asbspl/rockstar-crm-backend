@@ -5,6 +5,7 @@ const path = require("path");
 const fs = require("fs");
 
 const controller = require("../controllers/driver.controller");
+const { authorizeModuleAction } = require("../middlewares/auth.middleware");
 
 const router = express.Router();
 
@@ -50,11 +51,11 @@ const driverDocuments = upload.fields([
 // IMPORTANT: Add your existing authentication and Driver permission
 // middleware to these routes, following Company/Employee route conventions.
 
-router.get("/", controller.list);
-router.get("/:id", controller.getById);
-router.post("/", driverDocuments, controller.create);
-router.put("/:id", driverDocuments, controller.update);
-router.patch("/:id/status", controller.updateStatus);
-router.delete("/:id", controller.remove);
+router.get("/", authorizeModuleAction("drivers", "read"), controller.list);
+router.get("/:id", authorizeModuleAction("drivers", "read"), controller.getById);
+router.post("/", authorizeModuleAction("drivers", "create"), driverDocuments, controller.create);
+router.put("/:id", authorizeModuleAction("drivers", "update"), driverDocuments, controller.update);
+router.patch("/:id/status", authorizeModuleAction("drivers", "update"), controller.updateStatus);
+router.delete("/:id", authorizeModuleAction("drivers", "delete"), controller.remove);
 
 module.exports = router;

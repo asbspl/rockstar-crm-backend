@@ -2,7 +2,9 @@
 const express = require("express");
 const activityController = require("../controllers/activity.controller");
 const createAuthMiddleware = require("../middlewares/auth.middleware");
-const { authorizePermission } = require("../middlewares/auth.middleware");
+const {
+    authorizePermission,
+} = require("../middlewares/auth.middleware");
 
 function createActivityRoutes(config) {
     const router = express.Router();
@@ -16,7 +18,11 @@ function createActivityRoutes(config) {
 
     router.get("/filters", activityController.getActivityFilters);
 
-    router.post("/export", activityController.recordActivityExport);
+    router.post(
+        "/export",
+        authorizePermission("reports.export"),
+        activityController.recordActivityExport
+    );
 
     router.get("/:id", activityController.getActivityDetails);
 

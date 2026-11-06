@@ -96,6 +96,16 @@ function authorizePermission(permissionKey) {
   };
 }
 
+function authorizeModuleAction(moduleKey, action) {
+  const permissionKey = `${moduleKey}.${action}`;
+  if (!/^[a-z0-9_]+\.(read|create|update|delete)$/.test(permissionKey)) {
+    return function rejectInvalidPermissionConfiguration(_req, _res, next) {
+      return next(new ApiError(403, "Permission check is misconfigured"));
+    };
+  }
+  return authorizePermission(permissionKey);
+}
+
 function authorizeAnyPermission(permissionKeys) {
   return function permissionMiddleware(req, res, next) {
     const permissions = req.auth?.permissions || [];
@@ -128,5 +138,6 @@ function authorizeAllPermissions(permissionKeys) {
 
 module.exports = createAuthMiddleware;
 module.exports.authorizePermission = authorizePermission;
+module.exports.authorizeModuleAction = authorizeModuleAction;
 module.exports.authorizeAnyPermission = authorizeAnyPermission;
 module.exports.authorizeAllPermissions = authorizeAllPermissions;
