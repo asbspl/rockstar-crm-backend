@@ -129,6 +129,7 @@ async function resolveSite(client, input) {
     return result.rows[0];
 }
 
+
 async function resolveMatrixRates(
     client,
     { client_id, customer_id, site_id, location_id, items }
@@ -136,16 +137,45 @@ async function resolveMatrixRates(
     for (const item of items) {
         const result = await client.query(
             `SELECT rate
-             FROM public.rate_matrices
-             WHERE client_id = $1
-               AND customer_id = $2
-               AND product_id = $3
-               AND (site_id = $4 OR site_id IS NULL)
-               AND (location_id = $5 OR location_id IS NULL)
+             FROM public.rate_matrices rm
+             WHERE rm.client_id = $1
+               AND rm.customer_id = $2
+               AND rm.product_id = $3
+               AND (rm.site_id = $4 OR rm.site_id IS NULL)
+               AND (
+                    (
+                        $5::bigint IS NOT NULL
+                        AND (rm.location_id = $5::bigint OR rm.location_id IS NULL)
+                    )
+                    OR
+                    (
+                        $5::bigint IS NULL
+                        AND (
+                            rm.location_id IS NULL
+                            OR (
+                                rm.site_id = $4
+                                AND rm.location_id IS NOT NULL
+                                AND (
+                                    SELECT COUNT(*)
+                                    FROM public.rate_matrices x
+                                    WHERE x.client_id = $1
+                                      AND x.customer_id = $2
+                                      AND x.product_id = $3
+                                      AND x.site_id = $4
+                                      AND x.location_id IS NOT NULL
+                                ) = 1
+                            )
+                        )
+                    )
+               )
              ORDER BY
-                 CASE WHEN site_id = $4 THEN 0 ELSE 1 END,
-                 CASE WHEN location_id = $5 THEN 0 ELSE 1 END,
-                 id DESC
+                CASE WHEN rm.site_id = $4 THEN 0 ELSE 1 END,
+                CASE
+                    WHEN rm.location_id IS NULL THEN 0
+                    WHEN rm.location_id = $5::bigint THEN 0
+                    ELSE 1
+                END,
+                rm.id DESC
              LIMIT 1`,
             [
                 client_id,
@@ -175,6 +205,7 @@ async function resolveMatrixRates(
 
     return items;
 }
+
 
 async function calculateTotals(items) {
     const subtotal = items.reduce(
@@ -1054,6 +1085,7 @@ async function updateOrderStatus(id, status) {
     return getOrder(id);
 }
 
+
 async function saveDispatch(id, input) {
     const pool = getPool();
     const client = await pool.connect();
@@ -1063,11 +1095,25 @@ async function saveDispatch(id, input) {
         await client.query("BEGIN");
 
         const locked = await client.query(
-            "SELECT id, dcsno FROM public.orders WHERE id = $1 FOR UPDATE",
+            `SELECT
+                id,
+                client_id,
+                created_at,
+                dcsno,
+                EXTRACT(
+                    YEAR FROM created_at AT TIME ZONE 'Asia/Kolkata'
+                )::int AS order_year
+             FROM public.orders
+             WHERE id = $1
+             FOR UPDATE`,
             [orderId]
         );
 
-        if (!locked.rows[0]) throw createError("Order not found.", 404);
+        if (!locked.rows[0]) {
+            throw createError("Order not found.", 404);
+        }
+
+        const order = locked.rows[0];
 
         const dispatch_status = String(input.dispatch_status || "Pending");
 
@@ -1082,37 +1128,95 @@ async function saveDispatch(id, input) {
         const vehicle_type = textValue(input.vehicle_type, "Vehicle Type", 80, true);
         const contact = textValue(input.contact, "Driver Contact", 50, true);
 
-        const date = new Date(`${dispatch_date}T00:00:00`);
-
-        const dcsno = `${orderId}/${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getFullYear()).slice(-2)}`;
-
-        const duplicate = await client.query(
-            "SELECT id FROM public.orders WHERE dcsno = $1 AND id <> $2 LIMIT 1",
-            [dcsno, orderId]
+        const dispatch_sequence_no = textValue(
+            input.dispatch_sequence_no,
+            "Dispatch Sequence No",
+            100,
+            true
         );
 
-        if (duplicate.rowCount) {
-            throw createError(
-                `Delivery Challan number ${dcsno} is already assigned to another order.`,
-                409
+        // Preserve an already assigned Challan Number.
+        let dcsno = order.dcsno;
+
+        // Generate Challan Number only when it is not already assigned.
+        if (!dcsno || !String(dcsno).trim()) {
+            if (!order.client_id || !order.created_at) {
+                throw createError("Order client or creation date is missing.");
+            }
+
+            const year = Number(order.order_year);
+
+            // Serialize numbering for the same client and year.
+            await client.query(
+                `SELECT pg_advisory_xact_lock(
+                    hashtextextended($1, 0)
+                )`,
+                [`rockstar-dc:${order.client_id}:${year}`]
             );
+
+            // Count this client's orders in the same year,
+            // up to and including the current order.
+            const countResult = await client.query(
+                `SELECT COUNT(*)::int AS order_count
+                 FROM public.orders
+                 WHERE client_id = $1
+                   AND EXTRACT(
+                       YEAR FROM created_at AT TIME ZONE 'Asia/Kolkata'
+                   )::int = $2
+                   AND (
+                       created_at < $3
+                       OR (created_at = $3 AND id <= $4)
+                   )`,
+                [
+                    order.client_id,
+                    year,
+                    order.created_at,
+                    orderId,
+                ]
+            );
+
+            const clientOrderCount = Number(
+                countResult.rows[0].order_count
+            );
+
+            dcsno =
+                `DC${String(year).slice(-2)}` +
+                `${String(orderId).padStart(2, "0")}/` +
+                `${String(clientOrderCount).padStart(2, "0")}`;
+
+            const duplicate = await client.query(
+                `SELECT id
+                 FROM public.orders
+                 WHERE dcsno = $1
+                   AND id <> $2
+                 LIMIT 1`,
+                [dcsno, orderId]
+            );
+
+            if (duplicate.rowCount) {
+                throw createError(
+                    `Delivery Challan number ${dcsno} is already assigned to another order.`,
+                    409
+                );
+            }
         }
 
         await client.query(
             `UPDATE public.orders
              SET dcsno = $1,
-                 dispatch_sequence_no = $1,
-                 dispatch_date = $2,
-                 driver_id = $3,
-                 driver_name = $4,
-                 vehicle_no = $5,
-                 vehicle_type = $6,
-                 contact = $7,
-                 dispatch_status = $8,
+                 dispatch_sequence_no = $2,
+                 dispatch_date = $3,
+                 driver_id = $4,
+                 driver_name = $5,
+                 vehicle_no = $6,
+                 vehicle_type = $7,
+                 contact = $8,
+                 dispatch_status = $9,
                  updated_at = NOW()
-             WHERE id = $9`,
+             WHERE id = $10`,
             [
                 dcsno,
+                dispatch_sequence_no,
                 dispatch_date,
                 driver_id,
                 driver_name,

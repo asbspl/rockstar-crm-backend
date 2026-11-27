@@ -118,7 +118,7 @@ async function list(req, res, next) {
         const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
         const limit = Math.min(
             Math.max(Number.parseInt(req.query.limit, 10) || 10, 1),
-            100
+            5000
         );
 
         const result = await contractorModel.findAll({

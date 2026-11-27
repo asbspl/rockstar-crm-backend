@@ -77,7 +77,7 @@ function asyncHandler(fn) {
 exports.list = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
   const limit = Math.min(
-    100,
+    5000,
     Math.max(1, Number.parseInt(req.query.limit, 10) || 10)
   );
 

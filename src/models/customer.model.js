@@ -150,19 +150,22 @@ async function list({
 
         where = `
             WHERE
-                customer_name ILIKE $1
-                OR phone ILIKE $1
-                OR email ILIKE $1
-                OR city ILIKE $1
-                OR state ILIKE $1
-                OR contact_person ILIKE $1
+                c.customer_name ILIKE $1
+                OR c.phone ILIKE $1
+                OR c.email ILIKE $1
+                OR c.city ILIKE $1
+                OR c.state ILIKE $1
+                OR c.contact_person ILIKE $1
+                OR cl.client_name ILIKE $1
         `;
     }
 
     const countResult = await query(
         `
             SELECT COUNT(*)::int AS total
-            FROM public.customers
+            FROM public.customers c
+            LEFT JOIN public.clients cl
+                ON cl.id = c.client_id
             ${where}
         `,
         params
@@ -171,17 +174,24 @@ async function list({
     const total = countResult.rows[0]?.total ?? 0;
 
     const dataParams = [...params, safeLimit, offset];
-    const limitPlaceholder = dataParams.length - 1;
-    const offsetPlaceholder = dataParams.length;
 
     const result = await query(
         `
-            SELECT *
-            FROM public.customers
+            SELECT
+    c.*,
+    cl.client_name AS client_name,
+    cl.client_code AS client_code,
+    e.employee_name AS employee_name,
+    e.employee_code AS employee_code
+FROM public.customers c
+LEFT JOIN public.clients cl
+    ON cl.id = c.client_id
+LEFT JOIN public.employees e
+    ON e.id = c.under_employee_id
             ${where}
-            ORDER BY id DESC
-            LIMIT $${limitPlaceholder}
-            OFFSET $${offsetPlaceholder}
+            ORDER BY c.id DESC
+            LIMIT $${dataParams.length - 1}
+            OFFSET $${dataParams.length}
         `,
         dataParams
     );

@@ -51,6 +51,25 @@ const routesWithOwnAuthentication = [
   "/admin/registrations",
 ];
 
+
+// Public database health check
+app.get("/api/health/db", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json(
+      new ApiResponse("Database connection is healthy", {
+        status: "ok",
+      })
+    );
+  } catch (error) {
+    res.status(500).json(
+      new ApiResponse("Database connection failed", {
+        status: "error",
+      })
+    );
+  }
+});
+
 app.use("/api", auditContextMiddleware, (req, res, next) => {
   if (
     routesWithOwnAuthentication.some(
@@ -77,10 +96,10 @@ app.get("/", (req, res) => {
   res.json(new ApiResponse("Rockstar CRM API is running", {}));
 });
 
-app.get("/api/health/db", async (req, res) => {
-  await pool.query("SELECT 1");
-  res.json(new ApiResponse("Database connection is healthy", { status: "ok" }));
-});
+// app.get("/api/health/db", async (req, res) => {
+//   await pool.query("SELECT 1");
+//   res.json(new ApiResponse("Database connection is healthy", { status: "ok" }));
+// });
 
 const employeesRoutes = require("./routes/employees.routes");
 const driversRoutes = require("./routes/drivers.routes");

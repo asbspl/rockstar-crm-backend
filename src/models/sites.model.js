@@ -138,19 +138,44 @@ function getSiteSelect(customerNameColumn, locationNameColumn) {
 /**
  * List sites with pagination and search.
  */
-async function list({ page = 1, limit = 10, search = "" }) {
-    const offset = (page - 1) * limit;
+async function list({
+    page = 1,
+    limit = 10,
+    search = "",
+    customerId = null,
+}) {
+const offset = (page - 1) * limit;
 
-    const where = search
-        ? `WHERE
-                s.site_name ILIKE $1
-                OR c.display_name ILIKE $1
-                OR l.display_name ILIKE $1
-                OR s.city ILIKE $1
-                OR s.state ILIKE $1`
-        : "";
+const conditions = [];
+const params = [];
 
-    const params = search ? [`%${search}%`] : [];
+if (customerId !== null && customerId !== undefined) {
+    params.push(customerId);
+
+    conditions.push(
+        `s.customer_id = $${params.length}`
+    );
+}
+
+if (search) {
+    params.push(`%${search}%`);
+
+    const searchParam = `$${params.length}`;
+
+    conditions.push(`
+        (
+            s.site_name ILIKE ${searchParam}
+            OR c.display_name ILIKE ${searchParam}
+            OR l.display_name ILIKE ${searchParam}
+            OR s.city ILIKE ${searchParam}
+            OR s.state ILIKE ${searchParam}
+        )
+    `);
+}
+
+const where = conditions.length
+    ? `WHERE ${conditions.join(" AND ")}`
+    : "";
 
     const [
         customerNameColumn,

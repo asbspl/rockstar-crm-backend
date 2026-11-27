@@ -64,7 +64,7 @@ const FILE_FIELDS = [
 ];
 
 
-const ALLOWED_STATUSES = ["Active", "Hold", "Close"];
+const ALLOWED_STATUSES = ["Active", "Hold", "Inactive"];
 const ALLOWED_LOCATION_MODES = [
     "na",
     "manual",
@@ -363,11 +363,25 @@ async function create(body) {
     const data = normalize(body);
     validateRequired(data);
 
-    const clientCode = data.client_code;
-    delete data.client_code;
+    const codeResult = await query(
+        `SELECT
+            COALESCE(
+                MAX(
+                    CASE
+                        WHEN client_code ~ '^D-[0-9]+$'
+                        THEN SUBSTRING(client_code FROM 3)::integer
+                    END
+                ),
+                511
+            ) + 1 AS next_number
+         FROM public.clients`
+    );
+
+    data.client_code = `D-${codeResult.rows[0].next_number}`;
 
     const columns = Object.keys(data);
     const values = columns.map((key) => data[key]);
+
     const placeholders = values.map(
         (_, index) => `$${index + 1}`
     );
@@ -379,36 +393,7 @@ async function create(body) {
         values
     );
 
-    let client = result.rows[0];
-
-    if (!client.client_code) {
-        const generatedCode =
-            `CLI-${String(client.id).padStart(5, "0")}`;
-
-        const updated = await query(
-            `UPDATE public.clients
-             SET client_code = $1, updated_at = NOW()
-             WHERE id = $2
-             RETURNING ${COLUMNS}`,
-            [generatedCode, client.id]
-        );
-
-        client = updated.rows[0];
-    }
-
-    if (clientCode && clientCode !== client.client_code) {
-        const updated = await query(
-            `UPDATE public.clients
-             SET client_code = $1, updated_at = NOW()
-             WHERE id = $2
-             RETURNING ${COLUMNS}`,
-            [clientCode, client.id]
-        );
-
-        client = updated.rows[0];
-    }
-
-    return client;
+    return result.rows[0];
 }
 
 async function update(id, body) {
@@ -474,7 +459,7 @@ async function update(id, body) {
 async function updateStatus(id, status) {
     if (!ALLOWED_STATUSES.includes(status)) {
         throw createError(
-            "Status must be Active, Hold, or Close."
+            "Status must be Active, Hold, or Inactive."
         );
     }
 

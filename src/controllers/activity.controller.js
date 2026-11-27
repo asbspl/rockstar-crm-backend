@@ -26,7 +26,7 @@ const getActivities = async (req, res, next) => {
         );
 
         const limit = Math.min(
-            100,
+            5000,
             Math.max(
                 1,
                 Number.parseInt(req.query.limit, 10) || 25

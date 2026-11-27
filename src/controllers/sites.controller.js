@@ -220,13 +220,32 @@ exports.list = async (req, res) => {
             ? requestedLimit
             : 10;
 
-        const result = await Site.list({
-            page,
-            limit,
-            search: String(
-                req.query.search || ""
-            ).trim(),
-        });
+const customerIdRaw = req.query.customer_id;
+
+const customerId =
+    customerIdRaw !== undefined &&
+    customerIdRaw !== ""
+        ? Number.parseInt(customerIdRaw, 10)
+        : null;
+
+if (
+    customerId !== null &&
+    (!Number.isInteger(customerId) || customerId <= 0)
+) {
+    return res.status(400).json({
+        success: false,
+        message: "Invalid customer_id.",
+    });
+}
+
+const result = await Site.list({
+    page,
+    limit,
+    search: String(
+        req.query.search || ""
+    ).trim(),
+    customerId,
+});
 
         return res.json({
             success: true,

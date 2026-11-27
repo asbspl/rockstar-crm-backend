@@ -269,7 +269,7 @@ async function normalizePayload(body, files, existingOrder, db) {
 async function list(options = {}) {
     const page = Math.max(1, Number.parseInt(options.page, 10) || 1);
     const limit = Math.min(
-        100,
+        5000,
         Math.max(1, Number.parseInt(options.limit, 10) || 10)
     );
 
