@@ -63,7 +63,7 @@ function validateEmployee(data, isCreate = false) {
 async function getEmployees(query) {
   const page = Math.max(1, Number(query.page) || 1);
   const limit = Math.min(
-    100,
+    5000,
     Math.max(1, Number(query.limit) || 10)
   );
 

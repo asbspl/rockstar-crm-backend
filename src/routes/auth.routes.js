@@ -58,7 +58,7 @@ function createAuthRoutes(config) {
     validate(requestPasswordResetSchema),
     controller.requestPasswordReset
   );
-  console.log("In router")
+  // console.log("In router")
   router.post(
     "/request-password-reset",
     validate(requestPasswordResetSchema),

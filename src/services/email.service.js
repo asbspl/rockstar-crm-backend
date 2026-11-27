@@ -31,7 +31,7 @@ async function sendMail({ to, subject, text, html }) {
 
   try {
     const info = await getTransporter().sendMail({ from, to, subject, text, html });
-    console.log("[MAIL] Sent to:", to, "| messageId:", info.messageId, "| response:", info.response);
+    // console.log("[MAIL] Sent to:", to, "| messageId:", info.messageId, "| response:", info.response);
     return info;
   } catch (err) {
     console.error("[MAIL] Send failed:", err.code, err.message);

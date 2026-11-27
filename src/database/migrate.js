@@ -278,7 +278,7 @@ async function createDatabaseIfMissing(config) {
         `CREATE DATABASE ${quoteIdentifier(config.name)}`
       );
 
-      console.log("Configured PostgreSQL database created.");
+      // console.log("Configured PostgreSQL database created.");
 
       return true;
     } catch (error) {

@@ -89,7 +89,7 @@ async function listCompanies(req, res, next) {
 
     const limit = Math.min(
       Math.max(Number.parseInt(req.query.limit, 10) || 10, 1),
-      100
+      5000
     );
 
     const page = Math.max(
